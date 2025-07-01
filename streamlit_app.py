@@ -4,6 +4,7 @@ import requests
 from datetime import datetime
 from urllib.parse import quote
 import os
+import re
 
 # Cấu hình trang
 st.set_page_config(
@@ -78,9 +79,9 @@ def get_system_prompt():
 - Chỉ trả lời các vấn đề liên quan đến khoáng sản.
 - Đưa ra thông tin chính xác, trích dẫn điều luật cụ thể.
 - Giải thích rõ ràng, dễ hiểu.
-- Ưu tiên nguồn chính thống: thuvienphapluat.vn, monre.gov.vn, chinhphu.vn.
+- Ưu tiên nguồn chính thống: vbpl.vn, thuvienphapluat.vn, monre.gov.vn, chinhphu.vn.
 - Từ chối lịch sự các câu hỏi không liên quan.
-- Trích dẫn: Ghi rõ văn bản, điều, khoản; đề xuất kiểm tra thuvienphapluat.vn nếu không chắc chắn."""
+- Trích dẫn: Ghi rõ văn bản, điều, khoản; đề xuất kiểm tra vbpl.vn nếu không chắc chắn."""
 
 def get_welcome_message():
     """Lấy tin nhắn chào"""
@@ -90,7 +91,7 @@ def get_welcome_message():
     except FileNotFoundError:
         return """⚖️ Xin chào! Tôi là Trợ lý Pháp chế Khoáng sản Việt Nam.
 Hỗ trợ: Luật Khoáng sản, thủ tục cấp phép, thuế phí, xử phạt vi phạm.
-Hỏi tôi về khoáng sản nhé! 🤔 Kiểm tra thông tin tại thuvienphapluat.vn."""
+Hỏi tôi về khoáng sản nhé! 🤔 Kiểm tra thông tin tại vbpl.vn."""
 
 def get_default_model():
     """Lấy model mặc định"""
@@ -115,32 +116,49 @@ def should_search_web(message):
     search_indicators = ['mới nhất', 'cập nhật', 'hiện hành', 'ban hành', 'nghị định', 'thông tư', 'luật', 'pháp luật', 'điều']
     return is_mineral_related(message) and any(indicator in message.lower() for indicator in search_indicators)
 
+def validate_law_number(law_number, law_year):
+    """Kiểm tra tính hợp lệ của số hiệu văn bản"""
+    valid_laws = [
+        {"number": "60/2010/QH12", "year": 2010, "title": "Luật Khoáng sản"},
+        {"number": "54/2024/QH15", "year": 2024, "title": "Luật Địa chất và Khoáng sản"}
+    ]
+    for law in valid_laws:
+        if law_number == law["number"] and law_year == law["year"]:
+            return True
+    return False
+
 def simple_web_search(query, max_results=3):
-    """Tìm kiếm web tối ưu với nguồn chính thống"""
+    """Tìm kiếm web tối ưu, ưu tiên vbpl.vn"""
     try:
-        trusted_domains = ["thuvienphapluat.vn", "monre.gov.vn", "chinhphu.vn"]
-        encoded_query = quote(f"{query} khoáng sản")
+        trusted_domains = ["vbpl.vn", "thuvienphapluat.vn", "monre.gov.vn", "chinhphu.vn"]
+        encoded_query = quote(f"{query} khoáng sản site:vbpl.vn")
         search_url = "https://www.googleapis.com/customsearch/v1"
         params = {
             'key': st.secrets.get("GOOGLE_API_KEY"),
             'cx': st.secrets.get("GOOGLE_CSE_ID"),
             'q': encoded_query,
             'num': max_results,
-            'siteSearch': " OR ".join(f"site:{domain}" for domain in trusted_domains)
+            'siteSearch': "site:vbpl.vn"
         }
         response = requests.get(search_url, params=params, timeout=10)
+        results = []
         if response.status_code == 200:
             data = response.json()
-            results = []
             for item in data.get('items', [])[:max_results]:
                 content = item.get('snippet', '')
-                # Lọc nội dung để đảm bảo chất lượng
-                if len(content) > 50 and any(domain in item.get('link', '') for domain in trusted_domains):
+                if len(content) > 50 and "vbpl.vn" in item.get('link', ''):
+                    # Kiểm tra số hiệu văn bản trong tiêu đề hoặc nội dung
+                    law_match = re.search(r'(\d+/\d{4}/QH\d+)', content)
+                    if law_match:
+                        law_number = law_match.group(1)
+                        year = int(law_number.split('/')[1])
+                        if not validate_law_number(law_number, year):
+                            continue  # Bỏ qua nếu số hiệu không hợp lệ
                     results.append({
                         'title': item.get('title', '')[:100],
                         'content': content[:500],
                         'url': item.get('link', ''),
-                        'source': next((domain for domain in trusted_domains if domain in item.get('link', '')), 'Nguồn khác')
+                        'source': 'vbpl.vn'
                     })
             return results
         return []
@@ -150,15 +168,15 @@ def simple_web_search(query, max_results=3):
 def create_search_prompt(user_message, search_results):
     """Tạo prompt với kết quả tìm kiếm"""
     if not search_results:
-        return f"{user_message}\n\nLưu ý: Không tìm thấy thông tin từ nguồn chính thống. Vui lòng kiểm tra tại thuvienphapluat.vn."
+        return f"{user_message}\n\nLưu ý: Không tìm thấy thông tin từ vbpl.vn. Vui lòng kiểm tra tại vbpl.vn hoặc thuvienphapluat.vn."
     
     search_info = "\n\n=== THÔNG TIN TÌM KIẾM ===\n"
     for i, result in enumerate(search_results, 1):
         search_info += f"\nNguồn {i} ({result['source']}):\nTiêu đề: {result['title']}\nNội dung: {result['content']}...\nURL: {result['url']}\n---\n"
     search_info += """HƯỚNG DẪN:
-- Ưu tiên thông tin từ thuvienphapluat.vn, monre.gov.vn, chinhphu.vn.
+- Ưu tiên thông tin từ vbpl.vn, thuvienphapluat.vn, monre.gov.vn, chinhphu.vn.
 - Trích dẫn văn bản, điều, khoản cụ thể nếu có.
-- Khuyến nghị kiểm tra thuvienphapluat.vn để xác nhận.\n=== KẾT THÚC ===\n"""
+- Khuyến nghị kiểm tra vbpl.vn để xác nhận.\n=== KẾT THÚC ===\n"""
     return search_info + f"Câu hỏi: {user_message}"
 
 def main():
@@ -267,12 +285,12 @@ def main():
                 with st.status("🔍 Đang tìm kiếm..."):
                     search_results = simple_web_search(prompt)
                     if search_results:
-                        st.success(f"✅ Tìm thấy {len(search_results)} kết quả")
+                        st.success(f"✅ Tìm thấy {len(search_results)} kết quả từ vbpl.vn")
                         for i, result in enumerate(search_results, 1):
                             st.write(f"**{i}. {result['source']}:** {result['title'][:50]}...")
                         final_prompt = create_search_prompt(prompt, search_results)
                     else:
-                        st.warning("⚠️ Không tìm thấy kết quả")
+                        st.warning("⚠️ Không tìm thấy kết quả từ vbpl.vn")
             
             messages_for_api = [
                 msg for msg in st.session_state.messages[:-1] 
