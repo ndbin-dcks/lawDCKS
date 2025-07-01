@@ -4,10 +4,11 @@ import requests
 import json
 from datetime import datetime
 import re
-from urllib.parse import quote
+from urllib.parse import quote, urljoin
 import time
 import os
 import tiktoken
+from bs4 import BeautifulSoup
 
 # Cấu hình trang
 st.set_page_config(
@@ -101,7 +102,7 @@ def rfile(name_file):
         # Fallback content chuyên biệt cho khoáng sản
         fallback_content = {
             "00.xinchao.txt": "⚖️ Trợ lý Pháp chế Khoáng sản Việt Nam",
-            "01.system_trainning.txt": """Sếp là chuyên gia pháp chế về quản lý nhà nước trong lĩnh vực khoáng sản tại Việt Nam. Sếp có kiến thức sâu rộng về:
+            "01.system_trainning.txt": """Bạn là chuyên gia pháp chế về quản lý nhà nước trong lĩnh vực khoáng sản tại Việt Nam. Bạn có kiến thức sâu rộng về:
 
 🏔️ LĨNH VỰC CHUYÊN MÔN:
 - Luật Khoáng sản 2017 và các văn bản hướng dẫn thi hành
@@ -129,9 +130,9 @@ QUAN TRỌNG: Chỉ trả lời các câu hỏi về khoáng sản. Nếu câu h
             
             "02.assistant.txt": """Xin chào! ⚖️ 
 
-Em là Trợ lý Pháp chế chuyên về **Quản lý Nhà nước trong lĩnh vực Khoáng sản tại Việt Nam**.
+Tôi là Trợ lý Pháp chế chuyên về **Quản lý Nhà nước trong lĩnh vực Khoáng sản tại Việt Nam**.
 
-🏔️ **Em có thể hỗ trợ Sếp về:**
+🏔️ **Tôi có thể hỗ trợ bạn về:**
 
 ✅ **Pháp luật Khoáng sản:**
    • Luật Khoáng sản 2017 và văn bản hướng dẫn
@@ -156,143 +157,369 @@ Em là Trợ lý Pháp chế chuyên về **Quản lý Nhà nước trong lĩnh 
    • Đánh giá tác động môi trường
    • Phục hồi môi trường sau khai thác
 
-**🎯 Lưu ý:** Em chỉ tư vấn về lĩnh vực Khoáng sản. Đối với các vấn đề khác, Sếp vui lòng tham khảo chuyên gia phù hợp.
+**🎯 Lưu ý:** Tôi chỉ tư vấn về lĩnh vực Khoáng sản. Đối với các vấn đề khác, bạn vui lòng tham khảo chuyên gia phù hợp.
 
-**Sếp có thắc mắc gì về pháp luật Khoáng sản không?** 🤔""",
+**Bạn có thắc mắc gì về pháp luật Khoáng sản không?** 🤔""",
             
             "module_chatgpt.txt": "gpt-3.5-turbo"
         }
         return fallback_content.get(name_file, f"Nội dung mặc định cho {name_file}")
 
-# Lớp xử lý tìm kiếm web chuyên biệt cho khoáng sản
-class MineralLawSearcher:
+# Lớp tìm kiếm pháp luật nâng cao
+class AdvancedLegalSearcher:
     def __init__(self):
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         })
         
-        # Các nguồn ưu tiên cho khoáng sản
-        self.priority_domains = [
-            'thuvienphapluat.vn',
-            'monre.gov.vn', 
-            'portal.gov.vn',
-            'moj.gov.vn',
-            'mic.gov.vn'
-        ]
+        # Patterns để detect cấu trúc pháp luật
+        self.legal_patterns = {
+            'dieu': r'Điều\s+(\d+)',
+            'khoan': r'khoản\s+(\d+)',
+            'diem': r'điểm\s+([a-z])',
+            'luat': r'Luật\s+([^0-9]*?)\s*(?:số\s*)?(\d+/\d+/[A-Z]+\d*)?',
+            'nghi_dinh': r'Nghị định\s*(?:số\s*)?(\d+/\d+/[A-Z\-]+)',
+            'thong_tu': r'Thông tư\s*(?:số\s*)?(\d+/\d+/[A-Z\-]+)'
+        }
     
     def search(self, query, max_results=3):
-        """Tìm kiếm chuyên biệt cho pháp luật khoáng sản"""
+        """Tìm kiếm pháp luật với độ chính xác cao"""
         try:
-            # Thêm từ khóa chuyên ngành
-            enhanced_query = f"{query} khoáng sản Việt Nam"
+            # Phân tích query để xác định loại tìm kiếm
+            search_type = self._analyze_query(query)
             
-            # Thử tìm trên thuvienphapluat.vn trước
-            results = self._search_legal_database(enhanced_query, max_results)
+            results = []
             
+            if search_type == 'specific_article':
+                # Tìm kiếm điều khoản cụ thể
+                results = self._search_specific_article(query, max_results)
+            elif search_type == 'law_content':
+                # Tìm kiếm nội dung pháp luật tổng quát
+                results = self._search_law_content(query, max_results)
+            else:
+                # Tìm kiếm chung
+                results = self._search_general_legal(query, max_results)
+            
+            # Nếu không tìm thấy, thử fallback search
             if not results:
-                # Fallback sang DuckDuckGo với site filter
-                results = self._search_duckduckgo_legal(enhanced_query, max_results)
+                results = self._fallback_search(query, max_results)
             
             return results[:max_results]
             
         except Exception as e:
             st.error(f"Lỗi tìm kiếm pháp luật: {str(e)}")
-            return self._get_legal_fallback(query)
+            return self._get_error_result(query)
     
-    def _search_legal_database(self, query, max_results):
-        """Tìm kiếm trên cơ sở dữ liệu pháp luật"""
-        # Simulation của search trên thuvienphapluat.vn
-        # Trong thực tế có thể tích hợp API của họ
+    def _analyze_query(self, query):
+        """Phân tích query để xác định loại tìm kiếm"""
+        query_lower = query.lower()
+        
+        # Kiểm tra tìm kiếm điều khoản cụ thể
+        if re.search(r'điều\s+\d+', query_lower):
+            return 'specific_article'
+        
+        # Kiểm tra tìm kiếm nội dung luật
+        if any(keyword in query_lower for keyword in ['luật', 'nghị định', 'thông tư']):
+            return 'law_content'
+        
+        return 'general'
+    
+    def _search_specific_article(self, query, max_results):
+        """Tìm kiếm điều khoản cụ thể trong pháp luật"""
         results = []
         
         try:
-            # DuckDuckGo với site filter
-            site_query = f"site:thuvienphapluat.vn {query}"
-            results = self._search_duckduckgo_basic(site_query, max_results)
+            # Trích xuất thông tin từ query
+            article_match = re.search(r'điều\s+(\d+)', query.lower())
+            law_match = re.search(r'luật\s+([^0-9]*?)(?:\s*năm\s*(\d{4})|\s*số\s*([0-9/A-Z]+))?', query.lower())
             
-            # Đánh dấu nguồn ưu tiên
-            for result in results:
-                result['source'] = 'Thư viện Pháp luật'
-                result['priority'] = True
+            if article_match:
+                article_num = article_match.group(1)
                 
-        except:
+                if law_match:
+                    law_name = law_match.group(1).strip()
+                    year = law_match.group(2) if law_match.group(2) else None
+                    law_number = law_match.group(3) if law_match.group(3) else None
+                    
+                    # Tìm kiếm trên thuvienphapluat.vn
+                    results.extend(self._search_thuvienphapluat(
+                        f"điều {article_num} {law_name}", max_results
+                    ))
+                    
+                    # Tìm kiếm trên nguồn khác
+                    results.extend(self._search_legal_portals(
+                        f"điều {article_num} luật {law_name}", max_results - len(results)
+                    ))
+        
+        except Exception as e:
             pass
-            
+        
         return results
     
-    def _search_duckduckgo_legal(self, query, max_results):
-        """DuckDuckGo search với focus pháp luật"""
+    def _search_thuvienphapluat(self, query, max_results):
+        """Tìm kiếm trên thuvienphapluat.vn với độ chính xác cao"""
+        results = []
+        
         try:
-            legal_query = f"{query} site:gov.vn OR site:thuvienphapluat.vn"
-            return self._search_duckduckgo_basic(legal_query, max_results)
-        except:
-            return []
-    
-    def _search_duckduckgo_basic(self, query, max_results):
-        """DuckDuckGo cơ bản"""
-        try:
+            # Tối ưu query cho thuvienphapluat.vn
+            optimized_query = f"site:thuvienphapluat.vn {query}"
+            
+            # Sử dụng DuckDuckGo để search
             params = {
-                'q': query,
+                'q': optimized_query,
                 'format': 'json',
                 'no_html': '1',
                 'skip_disambig': '1'
             }
             
-            response = self.session.get(
-                "https://api.duckduckgo.com/", 
-                params=params, 
-                timeout=10
-            )
+            response = self.session.get("https://api.duckduckgo.com/", params=params, timeout=10)
             
-            if response.status_code != 200:
-                return []
+            if response.status_code == 200:
+                data = response.json()
                 
-            data = response.json()
-            results = []
-            
-            # Abstract answer
-            if data.get('Abstract') and len(data['Abstract']) > 50:
-                results.append({
-                    'title': data.get('AbstractText', 'Thông tin pháp luật')[:100],
-                    'content': data.get('Abstract'),
-                    'url': data.get('AbstractURL', ''),
-                    'source': data.get('AbstractSource', 'DuckDuckGo'),
-                    'priority': False
-                })
-            
-            # Related topics
-            for topic in data.get('RelatedTopics', [])[:max_results-len(results)]:
-                if isinstance(topic, dict) and topic.get('Text'):
+                # Abstract answer
+                if data.get('Abstract') and len(data['Abstract']) > 100:
+                    confidence = self._calculate_confidence(query, data.get('AbstractText', ''), data.get('Abstract'))
                     results.append({
-                        'title': topic.get('Text', '')[:80] + '...',
-                        'content': topic.get('Text', ''),
-                        'url': topic.get('FirstURL', ''),
-                        'source': 'DuckDuckGo',
-                        'priority': False
+                        'title': data.get('AbstractText', 'Thông tin pháp luật')[:100],
+                        'content': data.get('Abstract'),
+                        'url': data.get('AbstractURL', ''),
+                        'source': 'Thư viện Pháp luật',
+                        'priority': True,
+                        'confidence': confidence
                     })
-            
-            return results
-            
+                
+                # Related topics
+                for topic in data.get('RelatedTopics', [])[:max_results-len(results)]:
+                    if isinstance(topic, dict) and topic.get('Text'):
+                        confidence = self._calculate_confidence(query, topic.get('Text', ''), topic.get('Text', ''))
+                        results.append({
+                            'title': topic.get('Text', '')[:80] + '...',
+                            'content': topic.get('Text', ''),
+                            'url': topic.get('FirstURL', ''),
+                            'source': 'Thư viện Pháp luật',
+                            'priority': True,
+                            'confidence': confidence
+                        })
+        
         except Exception as e:
-            return []
+            pass
+        
+        return results
     
-    def _get_legal_fallback(self, query):
-        """Kết quả dự phòng cho tìm kiếm pháp luật"""
+    def _search_legal_portals(self, query, max_results):
+        """Tìm kiếm trên các portal pháp luật khác"""
+        results = []
+        
+        portals = [
+            ('portal.gov.vn', 'Cổng thông tin điện tử Chính phủ'),
+            ('monre.gov.vn', 'Bộ Tài nguyên và Môi trường'),
+            ('moj.gov.vn', 'Bộ Tư pháp')
+        ]
+        
+        for domain, source_name in portals:
+            try:
+                portal_results = self._search_domain(query, domain, source_name, max_results // len(portals))
+                results.extend(portal_results)
+                
+                if len(results) >= max_results:
+                    break
+                    
+            except:
+                continue
+        
+        return results
+    
+    def _search_domain(self, query, domain, source_name, max_results):
+        """Tìm kiếm trên domain cụ thể"""
+        results = []
+        
+        try:
+            # DuckDuckGo search với site filter
+            params = {
+                'q': f"site:{domain} {query}",
+                'format': 'json',
+                'no_html': '1'
+            }
+            
+            response = self.session.get("https://api.duckduckgo.com/", params=params, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                # Abstract answer
+                if data.get('Abstract'):
+                    confidence = self._calculate_confidence(query, data.get('AbstractText', ''), data.get('Abstract'))
+                    results.append({
+                        'title': data.get('AbstractText', 'Thông tin pháp luật')[:100],
+                        'content': data.get('Abstract'),
+                        'url': data.get('AbstractURL', ''),
+                        'source': source_name,
+                        'priority': True,
+                        'confidence': confidence
+                    })
+                
+                # Related topics
+                for topic in data.get('RelatedTopics', [])[:max_results-len(results)]:
+                    if isinstance(topic, dict) and topic.get('Text'):
+                        confidence = self._calculate_confidence(query, topic.get('Text', ''), topic.get('Text', ''))
+                        results.append({
+                            'title': topic.get('Text', '')[:80] + '...',
+                            'content': topic.get('Text', ''),
+                            'url': topic.get('FirstURL', ''),
+                            'source': source_name,
+                            'priority': True,
+                            'confidence': confidence
+                        })
+        
+        except Exception as e:
+            pass
+        
+        return results
+    
+    def _search_law_content(self, query, max_results):
+        """Tìm kiếm nội dung pháp luật tổng quát"""
+        results = []
+        
+        # Tìm kiếm với keywords được tối ưu
+        optimized_query = self._optimize_legal_query(query)
+        
+        # Tìm trên thuvienphapluat.vn
+        results.extend(self._search_thuvienphapluat(optimized_query, max_results))
+        
+        # Tìm trên các portal khác
+        if len(results) < max_results:
+            results.extend(self._search_legal_portals(optimized_query, max_results - len(results)))
+        
+        return results
+    
+    def _search_general_legal(self, query, max_results):
+        """Tìm kiếm pháp luật chung"""
+        enhanced_query = f"{query} khoáng sản Việt Nam pháp luật"
+        
+        results = []
+        
+        # DuckDuckGo search cơ bản
+        try:
+            params = {
+                'q': enhanced_query,
+                'format': 'json',
+                'no_html': '1'
+            }
+            
+            response = self.session.get("https://api.duckduckgo.com/", params=params, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                if data.get('Abstract'):
+                    confidence = self._calculate_confidence(query, data.get('AbstractText', ''), data.get('Abstract'))
+                    results.append({
+                        'title': data.get('AbstractText', 'Thông tin pháp luật'),
+                        'content': data.get('Abstract'),
+                        'url': data.get('AbstractURL', ''),
+                        'source': 'DuckDuckGo',
+                        'priority': False,
+                        'confidence': confidence
+                    })
+                
+                for topic in data.get('RelatedTopics', [])[:max_results-len(results)]:
+                    if isinstance(topic, dict) and topic.get('Text'):
+                        confidence = self._calculate_confidence(query, topic.get('Text', ''), topic.get('Text', ''))
+                        results.append({
+                            'title': topic.get('Text', '')[:80] + '...',
+                            'content': topic.get('Text', ''),
+                            'url': topic.get('FirstURL', ''),
+                            'source': 'DuckDuckGo',
+                            'priority': False,
+                            'confidence': confidence
+                        })
+        
+        except Exception as e:
+            pass
+        
+        return results
+    
+    def _fallback_search(self, query, max_results):
+        """Tìm kiếm dự phòng"""
         return [{
-            'title': 'Không thể tìm kiếm pháp luật trực tuyến',
-            'content': f'Hiện tại không thể tìm kiếm thông tin pháp luật cho: "{query}". Em sẽ trả lời dựa trên kiến thức pháp luật khoáng sản có sẵn.',
+            'title': 'Không tìm thấy thông tin cụ thể',
+            'content': f'Không thể tìm thấy thông tin chính xác cho "{query}". Tôi sẽ trả lời dựa trên kiến thức pháp luật có sẵn và khuyến nghị bạn tham khảo trực tiếp tại thuvienphapluat.vn hoặc liên hệ cơ quan có thẩm quyền.',
             'url': 'https://thuvienphapluat.vn',
             'source': 'Hệ thống',
-            'priority': False
+            'priority': False,
+            'confidence': 0.1
         }]
+    
+    def _get_error_result(self, query):
+        """Kết quả khi có lỗi"""
+        return [{
+            'title': 'Lỗi tìm kiếm pháp luật',
+            'content': f'Đã xảy ra lỗi khi tìm kiếm thông tin cho "{query}". Vui lòng thử lại sau hoặc tham khảo trực tiếp tại các nguồn chính thống.',
+            'url': '',
+            'source': 'Hệ thống',
+            'priority': False,
+            'confidence': 0.0
+        }]
+    
+    def _is_legal_content(self, title, content):
+        """Kiểm tra xem có phải nội dung pháp luật không"""
+        legal_indicators = [
+            'luật', 'nghị định', 'thông tư', 'quyết định', 'điều',
+            'khoản', 'điểm', 'chương', 'mục', 'bộ luật'
+        ]
+        
+        text = (title + ' ' + content).lower()
+        return any(indicator in text for indicator in legal_indicators)
+    
+    def _calculate_confidence(self, query, title, content):
+        """Tính độ tin cậy của kết quả"""
+        confidence = 0.3  # Base confidence
+        
+        query_words = set(query.lower().split())
+        content_words = set((title + ' ' + content).lower().split())
+        
+        # Intersection of words
+        common_words = query_words.intersection(content_words)
+        if len(query_words) > 0:
+            word_match_ratio = len(common_words) / len(query_words)
+            confidence += word_match_ratio * 0.4
+        
+        # Legal structure indicators
+        if re.search(r'điều\s+\d+', content.lower()):
+            confidence += 0.2
+        
+        if re.search(r'khoản\s+\d+', content.lower()):
+            confidence += 0.1
+        
+        if any(domain in content.lower() for domain in ['thuvienphapluat', 'gov.vn']):
+            confidence += 0.2
+        
+        # Specific legal document indicators
+        if re.search(r'luật\s+khoáng sản', content.lower()):
+            confidence += 0.3
+        
+        return min(confidence, 1.0)
+    
+    def _optimize_legal_query(self, query):
+        """Tối ưu query cho tìm kiếm pháp luật"""
+        # Thêm các từ khóa pháp luật liên quan
+        legal_terms = ['văn bản', 'quy định', 'hướng dẫn', 'pháp luật']
+        
+        # Nếu query chưa có từ khóa pháp luật, thêm vào
+        query_lower = query.lower()
+        if not any(term in query_lower for term in legal_terms):
+            query += ' quy định pháp luật'
+        
+        return query
 
-# Khởi tạo mineral law searcher
+# Khởi tạo advanced legal searcher
 @st.cache_resource
-def get_mineral_searcher():
-    return MineralLawSearcher()
+def get_advanced_legal_searcher():
+    return AdvancedLegalSearcher()
 
-mineral_searcher = get_mineral_searcher()
+advanced_legal_searcher = get_advanced_legal_searcher()
 
 def is_mineral_related(message):
     """Kiểm tra câu hỏi có liên quan đến khoáng sản không"""
@@ -327,27 +554,68 @@ def should_search_legal_web(message):
     return (is_mineral_related(message) and 
             any(indicator in message_lower for indicator in search_indicators))
 
-def create_legal_enhanced_prompt(user_message, search_results):
-    """Tạo prompt với thông tin pháp luật tìm kiếm"""
+def create_enhanced_legal_prompt(user_message, search_results):
+    """Tạo prompt nâng cao với kết quả tìm kiếm được sắp xếp theo độ tin cậy"""
     if not search_results or not any(r.get('content') for r in search_results):
-        return user_message
+        return f"""
+{user_message}
+
+QUAN TRỌNG: Không tìm thấy thông tin chính xác từ các nguồn pháp luật chính thống. 
+Hãy trả lời dựa trên kiến thức có sẵn và LƯU Ý:
+1. Ghi rõ đây là thông tin tham khảo, chưa được xác minh từ nguồn chính thống
+2. Khuyến nghị người hỏi tham khảo trực tiếp tại thuvienphapluat.vn
+3. Nếu là điều khoản cụ thể, đề xuất tìm kiếm trực tiếp trên website chính thống
+4. Đưa ra link trực tiếp: https://thuvienphapluat.vn
+"""
+    
+    # Sắp xếp kết quả theo độ tin cậy và priority
+    sorted_results = sorted(search_results, 
+                          key=lambda x: (x.get('priority', False), x.get('confidence', 0)), 
+                          reverse=True)
     
     legal_info = "\n\n=== THÔNG TIN PHÁP LUẬT TÌM KIẾM ===\n"
-    for i, result in enumerate(search_results, 1):
+    
+    high_confidence_found = False
+    
+    for i, result in enumerate(sorted_results, 1):
         if result.get('content'):
             priority_mark = "⭐ " if result.get('priority') else ""
-            legal_info += f"\n{priority_mark}Nguồn {i} ({result['source']}):\n"
+            confidence = result.get('confidence', 0)
+            confidence_mark = f"[Tin cậy: {confidence:.1f}]" if confidence > 0 else ""
+            
+            if confidence > 0.7:
+                high_confidence_found = True
+            
+            legal_info += f"\n{priority_mark}Nguồn {i} ({result['source']}) {confidence_mark}:\n"
             legal_info += f"Tiêu đề: {result['title']}\n"
-            legal_info += f"Nội dung: {result['content'][:500]}...\n"
+            legal_info += f"Nội dung: {result['content'][:600]}...\n"
+            
             if result.get('url'):
                 legal_info += f"URL: {result['url']}\n"
             legal_info += "---\n"
     
-    legal_info += "\nHướng dẫn: Sử dụng thông tin pháp luật trên để trả lời. "
-    legal_info += "Ưu tiên nguồn có ⭐. Hãy trích dẫn cụ thể điều, khoản nếu có.\n"
-    legal_info += "=== KẾT THÚC THÔNG TIN PHÁP LUẬT ===\n\n"
+    confidence_instruction = ""
+    if high_confidence_found:
+        confidence_instruction = "CÓ NGUỒN TIN CẬY CAO - Hãy ưu tiên các nguồn có độ tin cậy > 0.7"
+    else:
+        confidence_instruction = "KHÔNG CÓ NGUỒN TIN CẬY CAO - Hãy thận trọng khi trích dẫn và ghi rõ cần xác minh"
     
-    return legal_info + f"Câu hỏi về khoáng sản: {user_message}"
+    legal_info += f"""
+{confidence_instruction}
+
+HƯỚNG DẪN TRÍCH DẪN CHÍNH XÁC:
+1. Ưu tiên nguồn có ⭐ (nguồn chính thống)
+2. Ưu tiên kết quả có độ tin cậy cao (> 0.7)
+3. PHẢI trích dẫn cụ thể: "Theo Điều X khoản Y Luật/Nghị định số Z..."
+4. Nếu độ tin cậy thấp: "Thông tin tham khảo từ [nguồn], cần xác minh thêm"
+5. Luôn khuyến nghị: "Để có thông tin chính xác nhất, vui lòng tham khảo tại thuvienphapluat.vn"
+6. Nếu là điều khoản cụ thể nhưng không tìm thấy: "Không tìm thấy nội dung chính xác của điều này. Khuyến nghị tìm kiếm trực tiếp trên thuvienphapluat.vn"
+
+=== KẾT THÚC THÔNG TIN PHÁP LUẬT ===
+
+"""
+    
+    return legal_info + f"Câu hỏi: {user_message}"
 
 # Main UI
 def main():
@@ -379,7 +647,7 @@ def main():
             border-right: 4px solid #2196F3;
         }
         .user-message::before { 
-            content: "👤 Sếp: "; 
+            content: "👤 Bạn: "; 
             font-weight: bold; 
             color: #1976D2;
         }
@@ -523,21 +791,21 @@ def main():
             st.markdown(f'<div class="user-message">{prompt}</div>', unsafe_allow_html=True)
             
             # Phản hồi từ chối lịch sự
-            polite_refusal = """Xin lỗi, Em là trợ lý chuyên về **pháp luật khoáng sản** tại Việt Nam. 
+            polite_refusal = """Xin lỗi, tôi là trợ lý chuyên về **pháp luật khoáng sản** tại Việt Nam. 
 
-Em chỉ có thể tư vấn về các vấn đề liên quan đến:
+Tôi chỉ có thể tư vấn về các vấn đề liên quan đến:
 - 🏔️ Luật Khoáng sản và văn bản hướng dẫn
 - ⚖️ Thủ tục cấp phép thăm dò, khai thác
 - 💰 Thuế, phí liên quan đến khoáng sản  
 - 🌱 Bảo vệ môi trường trong hoạt động khoáng sản
 - ⚠️ Xử phạt vi phạm hành chính
 
-Sếp có thể hỏi Em về những vấn đề này không? Ví dụ:
+Bạn có thể hỏi tôi về những vấn đề này không? Ví dụ:
 - "Thủ tục xin phép khai thác đá như thế nào?"
 - "Mức thuế tài nguyên hiện tại ra sao?"
 - "Vi phạm trong khai thác khoáng sản bị phạt như thế nào?"
 
-Em sẵn sàng hỗ trợ Sếp! 😊"""
+Tôi sẵn sàng hỗ trợ bạn! 😊"""
             
             st.session_state.messages.append({"role": "assistant", "content": polite_refusal})
             st.markdown(f'<div class="assistant-message">{polite_refusal}</div>', 
@@ -555,21 +823,32 @@ Em sẵn sàng hỗ trợ Sếp! 😊"""
             final_prompt = prompt
             
             if legal_search_enabled and should_search_legal_web(prompt):
-                with st.status("🔍 Đang tìm kiếm văn bản pháp luật...", expanded=False) as status:
-                    search_results = mineral_searcher.search(prompt, max_results=3)
+                with st.status("🔍 Đang tìm kiếm văn bản pháp luật chính xác...", expanded=False) as status:
+                    search_results = advanced_legal_searcher.search(prompt, max_results=3)
                     
                     if search_results and any(r.get('content') for r in search_results):
+                        # Đếm nguồn ưu tiên và độ tin cậy cao
                         priority_count = sum(1 for r in search_results if r.get('priority'))
-                        st.success(f"✅ Tìm thấy {len(search_results)} kết quả ({priority_count} nguồn ưu tiên)")
+                        high_confidence_count = sum(1 for r in search_results if r.get('confidence', 0) > 0.7)
                         
+                        if high_confidence_count > 0:
+                            st.success(f"✅ Tìm thấy {len(search_results)} kết quả ({priority_count} nguồn ưu tiên, {high_confidence_count} tin cậy cao)")
+                        else:
+                            st.warning(f"⚠️ Tìm thấy {len(search_results)} kết quả ({priority_count} nguồn ưu tiên) - Độ tin cậy chưa cao")
+                        
+                        # Hiển thị kết quả với confidence scores
                         for i, result in enumerate(search_results, 1):
                             if result.get('content'):
                                 priority_mark = "⭐ " if result.get('priority') else ""
-                                st.write(f"**{priority_mark}{i}. {result['source']}:** {result['title'][:50]}...")
+                                confidence = result.get('confidence', 0)
+                                confidence_color = "🟢" if confidence > 0.7 else "🟡" if confidence > 0.4 else "🔴"
+                                
+                                st.write(f"**{priority_mark}{i}. {result['source']}** {confidence_color} [{confidence:.2f}]: {result['title'][:50]}...")
                         
-                        final_prompt = create_legal_enhanced_prompt(prompt, search_results)
-                        status.update(label="✅ Hoàn tất tìm kiếm pháp luật", state="complete", expanded=False)
+                        final_prompt = create_enhanced_legal_prompt(prompt, search_results)
+                        status.update(label="✅ Hoàn tất tìm kiếm pháp luật chính xác", state="complete", expanded=False)
                     else:
+                        st.warning("⚠️ Không tìm thấy văn bản pháp luật liên quan - Sẽ trả lời từ kiến thức có sẵn")
                         status.update(label="⚠️ Không tìm thấy văn bản liên quan", state="complete", expanded=False)
             
             # Đếm input tokens
