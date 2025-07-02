@@ -720,24 +720,25 @@ def main():
             st.markdown(f'<div class="user-message">{message["content"]}</div>', 
                        unsafe_allow_html=True)
     
+    
+# Thay thế phần xử lý chat input trong main() từ dòng "if prompt := st.chat_input"
+
     # Chat input
     if prompt := st.chat_input("Nhập câu hỏi về pháp luật khoáng sản..."):
         
+        # ALWAYS SHOW DEBUG INFO - KHÔNG CẦN TOGGLE
+        st.markdown("## 🐛 **FORCED DEBUG MODE**")
+        st.info(f"📝 **User Input:** {prompt}")
+        
         # Check if mineral related
-        if not is_mineral_related(prompt):
+        mineral_check = is_mineral_related(prompt)
+        st.info(f"🎯 **Is Mineral Related:** {mineral_check}")
+        
+        if not mineral_check:
             st.session_state.messages.append({"role": "user", "content": prompt})
             st.markdown(f'<div class="user-message">{prompt}</div>', unsafe_allow_html=True)
             
-            polite_refusal = """Xin lỗi, tôi là trợ lý chuyên về **pháp luật khoáng sản** tại Việt Nam.
-
-Tôi chỉ có thể tư vấn về các vấn đề liên quan đến:
-- 🏔️ Luật Khoáng sản và các văn bản hướng dẫn
-- ⚖️ Thủ tục cấp phép thăm dò, khai thác khoáng sản
-- 💰 Thuế, phí liên quan đến khoáng sản
-- 🌱 Bảo vệ môi trường trong hoạt động khoáng sản
-- ⚠️ Xử phạt vi phạm hành chính
-
-Bạn có thể hỏi tôi về những vấn đề này không? Tôi sẵn sàng hỗ trợ bạn! 😊"""
+            polite_refusal = """Xin lỗi, tôi là trợ lý chuyên về **pháp luật khoáng sản** tại Việt Nam."""
             
             st.session_state.messages.append({"role": "assistant", "content": polite_refusal})
             st.markdown(f'<div class="assistant-message">{polite_refusal}</div>', 
@@ -748,217 +749,209 @@ Bạn có thể hỏi tôi về những vấn đề này không? Tôi sẵn sàn
         st.session_state.messages.append({"role": "user", "content": prompt})
         st.markdown(f'<div class="user-message">{prompt}</div>', unsafe_allow_html=True)
         
-        # Process response
-        with st.spinner("🤔 Đang phân tích câu hỏi pháp luật..."):
-            search_results = []
-            final_prompt = prompt
+        # Check search conditions
+        web_search_check = should_search_web(prompt)
+        st.info(f"🔎 **Should Search Web:** {web_search_check}")
+        st.info(f"🔍 **Web Search Enabled (from toggle):** {web_search_enabled}")
+        
+        search_will_run = web_search_enabled and web_search_check
+        st.info(f"⚡ **Search Will Run:** {search_will_run}")
+        
+        # Process response với FORCED DEBUG
+        st.markdown("---")
+        st.markdown("### 🔄 **Processing Response...**")
+        
+        search_results = []
+        final_prompt = prompt
+        
+        if search_will_run:
+            st.success("✅ **SEARCH CONDITIONS MET - Starting search...**")
             
-            # DEBUG/Improved web search if enabled
-            if web_search_enabled and should_search_web(prompt):
-                with st.status("🔍 Đang tìm kiếm văn bản pháp luật với thuật toán cải tiến...", expanded=debug_mode) as status:
+            # Manual search test
+            st.markdown("### 🧪 **Manual Search Test**")
+            
+            try:
+                # Test basic DuckDuckGo API call
+                st.write("⏳ Testing basic DuckDuckGo API...")
+                
+                test_params = {
+                    'q': f'site:thuvienphapluat.vn {prompt}',
+                    'format': 'json',
+                    'no_html': '1'
+                }
+                
+                test_response = requests.get("https://api.duckduckgo.com/", 
+                                           params=test_params, timeout=10)
+                
+                st.success(f"✅ DuckDuckGo API Response: {test_response.status_code}")
+                
+                if test_response.status_code == 200:
+                    test_data = test_response.json()
                     
-                    if debug_mode:
-                        # DEBUG: Hiển thị search process
-                        st.write("🔍 **DEBUG: Search Process**")
-                        st.write(f"📝 Query: {prompt}")
-                        st.write(f"🎯 Is mineral related: {is_mineral_related(prompt)}")
-                        st.write(f"🔎 Should search web: {should_search_web(prompt)}")
+                    st.write("📊 **API Response Keys:**")
+                    st.json(list(test_data.keys()))
                     
-                    # Perform search với debug info
-                    search_results = []
-                    try:
-                        if debug_mode:
-                            st.write("⏳ Đang gọi search function...")
-                        search_results = advanced_web_search_improved(prompt)
-                        if debug_mode:
-                            st.write(f"✅ Search completed. Found {len(search_results)} results")
-                    except Exception as e:
-                        st.error(f"❌ Search failed: {str(e)}")
-                        if debug_mode:
-                            st.code(traceback.format_exc())
-                    
-                    # DEBUG: Hiển thị RAW search results
-                    if search_results and debug_mode:
-                        st.markdown("### 🔍 **RAW SEARCH RESULTS:**")
-                        
-                        for i, result in enumerate(search_results, 1):
-                            with st.expander(f"Result {i}: {result.get('title', 'No title')[:50]}...", expanded=False):
-                                st.json({
-                                    "title": result.get('title', ''),
-                                    "content": result.get('content', '')[:500] + "..." if len(result.get('content', '')) > 500 else result.get('content', ''),
-                                    "url": result.get('url', ''),
-                                    "source": result.get('source', ''),
-                                    "priority": result.get('priority', False),
-                                    "confidence": result.get('confidence', 0),
-                                    "document_type": result.get('document_type', 'Unknown')
-                                })
-                        
-                        # Thống kê search results
-                        priority_count = sum(1 for r in search_results if r.get('priority'))
-                        high_confidence_count = sum(1 for r in search_results if r.get('confidence', 0) > 0.7)
-                        very_high_confidence_count = sum(1 for r in search_results if r.get('confidence', 0) > 0.85)
-                        avg_confidence = sum(r.get('confidence', 0) for r in search_results) / len(search_results)
-                        
-                        st.markdown("### 📊 **SEARCH STATISTICS:**")
-                        col1, col2, col3, col4 = st.columns(4)
-                        with col1:
-                            st.metric("Total Results", len(search_results))
-                        with col2:
-                            st.metric("Priority Sources ⭐", priority_count)
-                        with col3:
-                            st.metric("High Confidence (>0.7)", high_confidence_count)
-                        with col4:
-                            st.metric("Avg Confidence", f"{avg_confidence:.2f}")
-                        
-                        # Quality assessment
-                        if very_high_confidence_count > 0:
-                            st.success(f"🎯 **EXCELLENT**: {very_high_confidence_count} very high confidence results")
-                        elif high_confidence_count > 0:
-                            st.success(f"✅ **GOOD**: {high_confidence_count} high confidence results")
-                        elif priority_count > 0:
-                            st.warning(f"⚠️ **MEDIUM**: {priority_count} priority sources but low confidence")
-                        else:
-                            st.error("❌ **POOR**: No high-quality results found")
-                    
-                    if search_results:
-                        # Create safe prompt
-                        final_prompt = create_safe_enhanced_search_prompt(prompt, search_results)
-                        
-                        # DEBUG: Hiển thị final prompt
-                        if debug_mode:
-                            with st.expander("🤖 **FINAL PROMPT TO AI** (Click to expand)", expanded=False):
-                                st.code(final_prompt[:2000] + "..." if len(final_prompt) > 2000 else final_prompt)
-                        
-                        # Show summary for non-debug mode
-                        if not debug_mode:
-                            priority_count = sum(1 for r in search_results if r.get('priority'))
-                            high_confidence_count = sum(1 for r in search_results if r.get('confidence', 0) > 0.7)
-                            very_high_confidence_count = sum(1 for r in search_results if r.get('confidence', 0) > 0.85)
-                            
-                            if very_high_confidence_count > 0:
-                                st.success(f"🎯 Tìm thấy {len(search_results)} kết quả ({very_high_confidence_count} rất tin cậy)")
-                            elif high_confidence_count > 0:
-                                st.success(f"✅ Tìm thấy {len(search_results)} kết quả ({high_confidence_count} tin cậy cao)")
-                            else:
-                                st.warning(f"⚠️ Tìm thấy {len(search_results)} kết quả (độ tin cậy thấp)")
-                        
-                        status.update(label="✅ Search completed with safe mode", state="complete", expanded=False)
-                        
+                    # Show Abstract if exists
+                    if test_data.get('Abstract'):
+                        st.write("📄 **Abstract Found:**")
+                        st.code(test_data['Abstract'][:300] + "...")
                     else:
-                        if debug_mode:
-                            st.error("❌ **NO SEARCH RESULTS FOUND**")
-                            st.markdown("### 🔍 **Possible reasons:**")
-                            st.markdown("- API calls failed")
-                            st.markdown("- No relevant content found") 
-                            st.markdown("- Content filtering too strict")
-                            st.markdown("- Network/timeout issues")
-                            
-                            # Test basic connectivity
-                            st.markdown("### 🧪 **Connectivity Test:**")
-                            try:
-                                test_response = requests.get("https://api.duckduckgo.com/", timeout=5)
-                                st.success(f"✅ DuckDuckGo API reachable (Status: {test_response.status_code})")
-                            except Exception as e:
-                                st.error(f"❌ DuckDuckGo API unreachable: {e}")
-                        
-                        # Fallback safe response
-                        final_prompt = f"""
+                        st.warning("⚠️ No Abstract in response")
+                    
+                    # Show RelatedTopics count
+                    related_count = len(test_data.get('RelatedTopics', []))
+                    st.write(f"🔗 **Related Topics Count:** {related_count}")
+                    
+                    if related_count > 0:
+                        st.write("📝 **First Related Topic:**")
+                        first_topic = test_data['RelatedTopics'][0]
+                        st.json(first_topic)
+                    
+                else:
+                    st.error(f"❌ API Error: {test_response.status_code}")
+                    
+            except Exception as e:
+                st.error(f"❌ API Test Failed: {str(e)}")
+                import traceback
+                st.code(traceback.format_exc())
+            
+            # Now try our actual search function
+            st.markdown("### 🔍 **Our Search Function Test**")
+            
+            try:
+                st.write("⏳ Calling advanced_web_search_improved...")
+                search_results = advanced_web_search_improved(prompt)
+                st.success(f"✅ Search function completed. Results: {len(search_results)}")
+                
+                if search_results:
+                    st.markdown("### 📋 **SEARCH RESULTS FOUND:**")
+                    
+                    for i, result in enumerate(search_results, 1):
+                        st.markdown(f"#### Result {i}:")
+                        st.json({
+                            "title": result.get('title', ''),
+                            "content": result.get('content', '')[:200] + "...",
+                            "url": result.get('url', ''),
+                            "confidence": result.get('confidence', 0),
+                            "priority": result.get('priority', False),
+                            "source": result.get('source', '')
+                        })
+                        st.markdown("---")
+                    
+                    # Create final prompt
+                    final_prompt = create_safe_enhanced_search_prompt(prompt, search_results)
+                    
+                    st.markdown("### 🤖 **Final Prompt (First 500 chars):**")
+                    st.code(final_prompt[:500] + "...")
+                    
+                else:
+                    st.error("❌ Search function returned 0 results")
+                    
+                    # Debug why no results
+                    st.markdown("### 🔍 **Debug: Why No Results?**")
+                    
+                    # Test individual components
+                    st.write("Testing search query construction...")
+                    
+                    test_queries = [
+                        f'site:thuvienphapluat.vn "{prompt}" luật khoáng sản',
+                        f'site:thuvienphapluat.vn khoáng sản "{prompt}"',
+                        f'site:monre.gov.vn "{prompt}" khoáng sản'
+                    ]
+                    
+                    for i, query in enumerate(test_queries, 1):
+                        st.code(f"Query {i}: {query}")
+                    
+                    # Safe fallback prompt
+                    final_prompt = f"""
 {prompt}
 
-CRITICAL: Search function failed completely. No results found.
-HƯỚNG DẪN TRẢ LỜI AN TOÀN:
-1. TUYỆT ĐỐI KHÔNG được bịa đặt thông tin pháp luật
-2. Chỉ được nói về nguyên tắc chung
-3. PHẢI khuyến nghị tham khảo nguồn chính thống
-
-Hãy trả lời: "Tôi gặp lỗi khi tìm kiếm thông tin pháp luật về vấn đề này. Để có thông tin chính xác nhất, bạn vui lòng:
-
-1. Truy cập trực tiếp thuvienphapluat.vn
-2. Tìm kiếm với từ khóa liên quan đến câu hỏi
-3. Liên hệ Sở Tài nguyên và Môi trường địa phương
-4. Tham khảo Luật Khoáng sản hiện hành
-
-Xin lỗi vì sự bất tiện này."
+CRITICAL: Search function returned no results.
+Hãy trả lời: "Tôi không tìm thấy thông tin chính xác về vấn đề này từ các nguồn pháp luật chính thống. Để có thông tin chính xác nhất, bạn vui lòng tham khảo trực tiếp tại thuvienphapluat.vn"
 """
-                        
-                        status.update(label="❌ Search failed - using safe fallback", state="error", expanded=False)
-            
-            else:
-                if debug_mode:
-                    st.info("🔍 **Search disabled** or query not eligible for web search")
+                    
+            except Exception as e:
+                st.error(f"❌ Search function failed: {str(e)}")
+                import traceback
+                st.code(traceback.format_exc())
+                
+                # Emergency fallback
                 final_prompt = f"""
 {prompt}
 
-QUAN TRỌNG: Không có tìm kiếm web được thực hiện.
-HƯỚNG DẪN TRẢ LỜI AN TOÀN:
-1. TUYỆT ĐỐI KHÔNG được bịa đặt số luật, số điều, số khoản
-2. Chỉ được nói về các nguyên tắc chung về pháp luật khoáng sản
-3. PHẢI khuyến nghị tham khảo nguồn chính thống để có thông tin chính xác
+CRITICAL: Search function crashed.
+Hãy trả lời: "Tôi gặp lỗi kỹ thuật khi tìm kiếm thông tin. Vui lòng tham khảo trực tiếp tại thuvienphapluat.vn"
 """
+        
+        else:
+            st.warning("⚠️ **SEARCH NOT TRIGGERED**")
+            st.write("Possible reasons:")
+            st.write("- Web search toggle is OFF")
+            st.write("- Query doesn't match search indicators")
+            st.write("- Not mineral related")
             
-            # Count input tokens
-            messages_for_api = [
-                msg for msg in st.session_state.messages[:-1] 
-                if msg["role"] != "system" or msg == st.session_state.messages[0]
-            ]
-            messages_for_api.append({"role": "user", "content": final_prompt})
+            # No search fallback prompt
+            final_prompt = f"""
+{prompt}
+
+QUAN TRỌNG: Không có tìm kiếm web được thực hiện.
+HƯỚNG DẪN: Chỉ được nói về nguyên tắc chung và khuyến nghị tham khảo nguồn chính thống.
+"""
+        
+        # Show final prompt to be sent to AI
+        st.markdown("### 📨 **Final Prompt to AI:**")
+        with st.expander("Click to view full prompt", expanded=False):
+            st.code(final_prompt)
+        
+        # Generate AI response (keeping original logic)
+        messages_for_api = [
+            msg for msg in st.session_state.messages[:-1] 
+            if msg["role"] != "system" or msg == st.session_state.messages[0]
+        ]
+        messages_for_api.append({"role": "user", "content": final_prompt})
+        
+        input_text = "\n".join([msg["content"] for msg in messages_for_api])
+        input_tokens = count_tokens(input_text)
+        
+        # Generate response
+        try:
+            response = ""
             
-            input_text = "\n".join([msg["content"] for msg in messages_for_api])
-            input_tokens = count_tokens(input_text)
+            stream = client.chat.completions.create(
+                model=selected_model,
+                messages=messages_for_api,
+                stream=True,
+                temperature=temperature,
+                max_tokens=2000
+            )
             
-            # Generate response
-            try:
-                response = ""
-                
-                stream = client.chat.completions.create(
-                    model=selected_model,
-                    messages=messages_for_api,
-                    stream=True,
-                    temperature=temperature,
-                    max_tokens=2000
-                )
-                
-                response_container = st.empty()
-                
-                for chunk in stream:
-                    if chunk.choices and chunk.choices[0].delta.content:
-                        response += chunk.choices[0].delta.content
-                        response_container.markdown(
-                            f'<div class="assistant-message">{response}▌</div>', 
-                            unsafe_allow_html=True
-                        )
-                
-                # Final response
-                response_container.markdown(
-                    f'<div class="assistant-message">{response}</div>', 
-                    unsafe_allow_html=True
-                )
-                
-                # Update stats
-                output_tokens = count_tokens(response)
-                update_stats(input_tokens, output_tokens, selected_model)
-                
-                # Show request stats
-                with st.expander("📊 Thống kê request này"):
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.metric("Input tokens", f"{input_tokens:,}")
-                    with col2:
-                        st.metric("Output tokens", f"{output_tokens:,}")
-                    with col3:
-                        if selected_model in MODEL_PRICING:
-                            pricing = MODEL_PRICING[selected_model]
-                            cost = (input_tokens / 1000) * pricing["input"] + (output_tokens / 1000) * pricing["output"]
-                            st.metric("Chi phí", f"${cost:.4f}")
-                
-            except Exception as e:
-                error_msg = f"❌ Lỗi hệ thống: {str(e)}"
-                st.markdown(f'<div class="assistant-message">{error_msg}</div>', 
-                           unsafe_allow_html=True)
-                response = error_msg
+            response_container = st.empty()
+            
+            for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    response += chunk.choices[0].delta.content
+                    response_container.markdown(
+                        f'<div class="assistant-message">{response}▌</div>', 
+                        unsafe_allow_html=True
+                    )
+            
+            # Final response
+            response_container.markdown(
+                f'<div class="assistant-message">{response}</div>', 
+                unsafe_allow_html=True
+            )
+            
+            # Update stats
+            output_tokens = count_tokens(response)
+            update_stats(input_tokens, output_tokens, selected_model)
+            
+        except Exception as e:
+            error_msg = f"❌ Lỗi AI response: {str(e)}"
+            st.markdown(f'<div class="assistant-message">{error_msg}</div>', 
+                       unsafe_allow_html=True)
+            response = error_msg
         
         # Add response to history
         st.session_state.messages.append({"role": "assistant", "content": response})
-
 if __name__ == "__main__":
     main()
