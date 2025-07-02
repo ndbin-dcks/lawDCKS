@@ -1,5 +1,21 @@
+# Core Streamlit and OpenAI
 streamlit>=1.28.0
 openai>=1.3.0
+
+# Web scraping and HTTP requests
 requests>=2.31.0
-beautifulsoup4==4.12.2
-lxml==4.9.3
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+
+# Data processing
+pandas>=2.0.0
+
+# Python standard library extensions (usually included, but just in case)
+# These are typically built-in, but some environments might need explicit installation
+urllib3>=1.26.0
+
+# Optional: If you need specific versions, uncomment and adjust:
+# streamlit==1.28.1
+# openai==1.3.5
+# requests==2.31.0
+# beautifulsoup4==4.12.2
