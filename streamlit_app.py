@@ -38,14 +38,18 @@ class VBPLConfig:
     prioritize_active_docs: bool = True
 
 # =================== VBPL DATABASE INTEGRATION ===================
+# Thay thế TOÀN BỘ class VBPLDatabase trong streamlit_app.py
 
 class VBPLDatabase:
-    """Database manager cho VBPL với Streamlit integration"""
+    """Database manager cho VBPL với DYNAMIC schema detection"""
     
     def __init__(self, config: VBPLConfig):
         self.config = config
         self.conn = None
         self.available = False
+        self.content_table = None
+        self.content_columns = []
+        self.text_columns = []
         self._init_connection()
     
     def _init_connection(self):
@@ -68,65 +72,164 @@ class VBPLDatabase:
             return False
     
     def _analyze_database(self):
-        """Phân tích cấu trúc database và hiển thị stats"""
+        """Phân tích cấu trúc database và hiển thị ACTUAL schema"""
         try:
             cursor = self.conn.cursor()
             
-            # Check tables exist
+            # Get all tables
             cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
             tables = [row[0] for row in cursor.fetchall()]
             
-            st.sidebar.success(f"✅ VBPL Database Online")
-            st.sidebar.caption(f"📊 {len(tables)} tables detected")
+            st.sidebar.success(f"✅ VBPL Database Connected")
+            st.sidebar.caption(f"📊 Found {len(tables)} tables")
             
-            # Check for expected tables
-            expected_tables = ['documents', 'vbpl_content']
-            missing_tables = [t for t in expected_tables if t not in tables]
-            
-            if missing_tables:
-                st.sidebar.warning(f"⚠️ Missing tables: {missing_tables}")
-            
-            # Analyze document distribution if documents table exists
-            if 'documents' in tables:
-                cursor.execute("SELECT state, COUNT(*) FROM documents GROUP BY state ORDER BY COUNT(*) DESC")
-                status_dist = cursor.fetchall()
+            # Show actual table structure
+            with st.sidebar.expander("🔍 Database Schema Inspector", expanded=True):
+                st.write("**📋 Available Tables:**")
+                for table in tables:
+                    st.write(f"• {table}")
                 
-                with st.sidebar.expander("📊 Database Statistics", expanded=False):
-                    total_docs = sum(count for _, count in status_dist)
-                    st.metric("Total Documents", f"{total_docs:,}")
+                # Show detailed schema for key tables
+                for table in tables[:5]:  # Limit to first 5 tables
+                    try:
+                        cursor.execute(f"PRAGMA table_info({table})")
+                        columns = cursor.fetchall()
+                        
+                        st.write(f"\n**📄 {table} structure:**")
+                        for col in columns[:10]:  # Show first 10 columns
+                            st.caption(f"  - {col[1]} ({col[2]})")
+                        
+                        # Show sample data count
+                        cursor.execute(f"SELECT COUNT(*) FROM {table}")
+                        count = cursor.fetchone()[0]
+                        st.caption(f"  📊 Rows: {count:,}")
+                        
+                        if count > 0 and count < 1000000:  # Safety check
+                            cursor.execute(f"SELECT * FROM {table} LIMIT 1")
+                            sample = cursor.fetchone()
+                            if sample:
+                                st.caption(f"  📝 Sample keys: {list(sample.keys())[:5]}")
                     
-                    for status, count in status_dist[:5]:  # Top 5 statuses
-                        percentage = (count / total_docs) * 100
-                        st.metric(status, f"{count:,} ({percentage:.1f}%)")
+                    except Exception as e:
+                        st.caption(f"  ❌ Error inspecting {table}: {e}")
             
-            # Check vbpl_content table
-            if 'vbpl_content' in tables:
-                cursor.execute("SELECT COUNT(*) FROM vbpl_content")
-                content_count = cursor.fetchone()[0]
-                st.sidebar.metric("Legal Content Items", f"{content_count:,}")
+            # Try to identify the correct content table
+            self.content_table = self._identify_content_table(tables)
+            if self.content_table:
+                st.sidebar.info(f"🎯 Using content table: {self.content_table}")
                 
-                # Check domain coverage
-                cursor.execute("""
-                    SELECT COUNT(*) FROM vbpl_content 
-                    WHERE LOWER(element_content) LIKE '%khoáng sản%' 
-                    OR LOWER(document_name) LIKE '%khoáng sản%'
-                """)
-                mineral_count = cursor.fetchone()[0]
-                
-                if content_count > 0:
-                    mineral_percentage = (mineral_count / content_count) * 100
-                    st.sidebar.metric("Khoáng sản Content", f"{mineral_count:,} ({mineral_percentage:.1f}%)")
+                # Show identified text columns
+                if self.text_columns:
+                    st.sidebar.caption(f"📝 Text columns: {', '.join(self.text_columns[:3])}")
+            else:
+                st.sidebar.error("❌ No suitable content table found")
             
         except Exception as e:
             st.sidebar.error(f"❌ Database analysis failed: {e}")
     
+    def _identify_content_table(self, tables: List[str]) -> Optional[str]:
+        """Identify the correct table for legal content"""
+        try:
+            cursor = self.conn.cursor()
+            
+            # Possible table names for legal content (in priority order)
+            candidate_tables = [
+                'vbpl_content', 'legal_content', 'content', 'elements', 
+                'vbpl_section', 'vbpl_clause', 'vbpl_point',
+                'sections', 'clauses', 'points', 'articles',
+                'documents'  # Fallback to documents table
+            ]
+            
+            for candidate in candidate_tables:
+                if candidate in tables:
+                    try:
+                        # Check table structure
+                        cursor.execute(f"PRAGMA table_info({candidate})")
+                        columns = [col[1] for col in cursor.fetchall()]
+                        
+                        # Look for text content columns
+                        text_columns = [col for col in columns if any(
+                            term in col.lower() for term in [
+                                'content', 'text', 'body', 'description', 'name', 
+                                'title', 'heading', 'summary', 'abstract'
+                            ]
+                        )]
+                        
+                        if text_columns:
+                            # Check if it has substantial data
+                            cursor.execute(f"SELECT COUNT(*) FROM {candidate}")
+                            count = cursor.fetchone()[0]
+                            
+                            if count > 0:
+                                # Check if text columns have actual content
+                                sample_query = f"SELECT {text_columns[0]} FROM {candidate} WHERE {text_columns[0]} IS NOT NULL AND LENGTH(TRIM({text_columns[0]})) > 50 LIMIT 1"
+                                cursor.execute(sample_query)
+                                sample = cursor.fetchone()
+                                
+                                if sample and sample[0]:
+                                    self.content_columns = columns
+                                    self.text_columns = text_columns
+                                    
+                                    st.sidebar.success(f"✅ Found content in table: {candidate}")
+                                    st.sidebar.caption(f"📊 {count:,} rows, {len(text_columns)} text columns")
+                                    
+                                    return candidate
+                    
+                    except Exception as e:
+                        st.sidebar.warning(f"⚠️ Error checking {candidate}: {e}")
+                        continue
+            
+            # If no direct match found, try to find any table with substantial text
+            st.sidebar.warning("🔍 No standard content table found, searching all tables...")
+            
+            for table in tables:
+                try:
+                    cursor.execute(f"PRAGMA table_info({table})")
+                    columns = [col[1] for col in cursor.fetchall()]
+                    
+                    # Look for any text columns
+                    text_columns = [col for col in columns if any(
+                        term in col.lower() for term in [
+                            'content', 'text', 'body', 'name', 'title', 'description'
+                        ]
+                    )]
+                    
+                    if len(text_columns) >= 1:  # Need at least 1 text column
+                        cursor.execute(f"SELECT COUNT(*) FROM {table}")
+                        count = cursor.fetchone()[0]
+                        
+                        if count > 10:  # Some substantial data
+                            # Test if has meaningful content
+                            test_query = f"SELECT {text_columns[0]} FROM {table} WHERE {text_columns[0]} IS NOT NULL LIMIT 1"
+                            cursor.execute(test_query)
+                            sample = cursor.fetchone()
+                            
+                            if sample and len(str(sample[0])) > 20:
+                                self.content_columns = columns
+                                self.text_columns = text_columns
+                                
+                                st.sidebar.info(f"🔍 Using fallback table: {table}")
+                                st.sidebar.caption(f"📊 {count:,} rows, {len(text_columns)} text columns")
+                                
+                                return table
+                
+                except Exception:
+                    continue
+            
+            return None
+            
+        except Exception as e:
+            st.sidebar.error(f"❌ Error identifying content table: {e}")
+            return None
+    
     def is_available(self) -> bool:
-        """Check if database is available and connected"""
-        return self.available and self.conn is not None
+        """Check if database is available and has content table"""
+        return self.available and self.conn is not None and self.content_table is not None
     
     def search_domain_specific(self, query: str, max_results: int = 5) -> List[Dict[str, Any]]:
-        """Search database với domain-specific filtering cho khoáng sản"""
+        """Search database với DYNAMIC schema detection"""
         if not self.is_available():
+            st.error("❌ Database hoặc content table không khả dụng")
             return []
         
         try:
@@ -138,106 +241,113 @@ class VBPLDatabase:
                 return []
             
             # Display search info
-            st.write(f"🔍 **Searching for**: {', '.join(keywords[:3])}")
+            st.write(f"🔍 **Table**: {self.content_table}")
+            st.write(f"🔍 **Keywords**: {', '.join(keywords[:3])}")
+            st.write(f"📊 **Text columns**: {', '.join(self.text_columns[:3])}")
             
-            # Build search query với domain filtering
+            # Build DYNAMIC search query based on actual schema
             search_conditions = []
             params = []
             
-            # 1. Domain filtering - KHOÁNG SẢN
+            # 1. Domain filtering cho khoáng sản
             domain_keywords = ['khoáng sản', 'tài nguyên', 'thăm dò', 'khai thác', 'mỏ', 'địa chất']
-            domain_condition = " OR ".join([f"LOWER(element_content) LIKE ?" for _ in domain_keywords])
-            domain_condition += " OR " + " OR ".join([f"LOWER(document_name) LIKE ?" for _ in domain_keywords])
             
-            search_conditions.append(f"({domain_condition})")
-            params.extend([f"%{kw}%" for kw in domain_keywords])
-            params.extend([f"%{kw}%" for kw in domain_keywords])
+            domain_conditions = []
+            for text_col in self.text_columns[:3]:  # Limit to first 3 text columns
+                for keyword in domain_keywords:
+                    domain_conditions.append(f"LOWER({text_col}) LIKE ?")
+                    params.append(f"%{keyword}%")
+            
+            if domain_conditions:
+                search_conditions.append(f"({' OR '.join(domain_conditions)})")
             
             # 2. Query-specific keywords
-            query_condition = " OR ".join([f"LOWER(element_content) LIKE ?" for _ in keywords])
-            query_condition += " OR " + " OR ".join([f"LOWER(element_name) LIKE ?" for _ in keywords])
+            query_conditions = []
+            for text_col in self.text_columns[:3]:  # Limit to first 3 text columns
+                for keyword in keywords[:5]:  # Limit keywords
+                    query_conditions.append(f"LOWER({text_col}) LIKE ?")
+                    params.append(f"%{keyword}%")
             
-            search_conditions.append(f"({query_condition})")
-            params.extend([f"%{kw}%" for kw in keywords])
-            params.extend([f"%{kw}%" for kw in keywords])
+            if query_conditions:
+                search_conditions.append(f"({' OR '.join(query_conditions)})")
             
-            # 3. Build final query với prioritization
-            state_priority = """
-                CASE 
-                    WHEN LOWER(document_state) LIKE '%còn hiệu lực%' THEN 3
-                    WHEN LOWER(document_state) LIKE '%có hiệu lực%' THEN 3  
-                    WHEN LOWER(document_state) LIKE '%hết hiệu lực%' THEN 1
-                    ELSE 2 
-                END
-            """
+            # 3. Build SELECT with available columns
+            column_mapping = self._build_column_mapping()
             
-            # Element type priority
-            element_priority = """
-                CASE 
-                    WHEN element_type = 'vbpl_section' THEN 3
-                    WHEN element_type = 'vbpl_clause' THEN 2
-                    WHEN element_type = 'vbpl_point' THEN 1
-                    ELSE 0
-                END
-            """
+            # Select relevant columns that exist
+            select_columns = []
+            for standard_field, mapped_column in column_mapping.items():
+                if mapped_column:
+                    select_columns.append(mapped_column)
             
-            sql = f"""
-            SELECT 
-                element_id,
-                element_type,
-                element_number,
-                element_name,
-                element_content,
-                document_number,
-                document_name,
-                document_state,
-                {state_priority} as status_priority,
-                {element_priority} as element_priority,
-                LENGTH(element_content) as content_length
-            FROM vbpl_content 
-            WHERE {' AND '.join(search_conditions)}
-            AND element_content IS NOT NULL 
-            AND LENGTH(TRIM(element_content)) > 50
-            ORDER BY 
-                status_priority DESC,
-                element_priority DESC,
-                content_length DESC,
-                element_id
-            LIMIT ?
-            """
+            # Ensure we have at least some columns
+            if not select_columns:
+                select_columns = self.content_columns[:10]  # First 10 columns as fallback
             
+            # Remove duplicates while preserving order
+            select_columns = list(dict.fromkeys(select_columns))
+            
+            # 4. Build final query
+            sql = f"SELECT {', '.join(select_columns)} FROM {self.content_table}"
+            
+            if search_conditions:
+                sql += f" WHERE {' AND '.join(search_conditions)}"
+            
+            # Add basic filtering if we have a main text column
+            main_text_col = self.text_columns[0] if self.text_columns else None
+            if main_text_col:
+                if search_conditions:
+                    sql += f" AND {main_text_col} IS NOT NULL"
+                    sql += f" AND LENGTH(TRIM({main_text_col})) > 30"
+                else:
+                    sql += f" WHERE {main_text_col} IS NOT NULL"
+                    sql += f" AND LENGTH(TRIM({main_text_col})) > 30"
+                
+                # Order by content length
+                sql += f" ORDER BY LENGTH({main_text_col}) DESC"
+            
+            sql += f" LIMIT ?"
             params.append(max_results)
+            
+            st.write(f"🔍 **Query preview**: {sql[:150]}...")
+            st.write(f"📊 **Parameters**: {len(params)} params")
             
             cursor.execute(sql, params)
             results = cursor.fetchall()
             
             st.write(f"📊 **Raw database results**: {len(results)}")
             
-            # Process results
+            # Process results với dynamic mapping
             processed_results = []
             for row in results:
-                relevance_score = self._calculate_relevance(query, dict(row))
+                row_dict = dict(row)
                 
-                processed_results.append({
-                    'element_id': row['element_id'],
-                    'element_type': row['element_type'],
-                    'element_number': row['element_number'] or '',
-                    'element_name': row['element_name'] or '',
-                    'element_content': row['element_content'] or '',
-                    'document_number': row['document_number'],
-                    'document_name': row['document_name'],
-                    'document_state': row['document_state'],
-                    'is_active': self._is_document_active(row['document_state']),
-                    'relevance_score': relevance_score,
-                    'status_priority': row['status_priority'],
-                    'element_priority': row['element_priority']
-                })
+                # Map to standard format
+                mapped_result = {
+                    'element_id': self._safe_get_field(row_dict, column_mapping, 'id'),
+                    'element_type': self._safe_get_field(row_dict, column_mapping, 'type') or 'content',
+                    'element_number': self._safe_get_field(row_dict, column_mapping, 'number'),
+                    'element_name': self._safe_get_field(row_dict, column_mapping, 'name'),
+                    'element_content': self._safe_get_field(row_dict, column_mapping, 'content'),
+                    'document_number': self._safe_get_field(row_dict, column_mapping, 'document'),
+                    'document_name': self._safe_get_field(row_dict, column_mapping, 'doc_name'),
+                    'document_state': self._safe_get_field(row_dict, column_mapping, 'state') or 'Unknown',
+                    'is_active': self._is_document_active(self._safe_get_field(row_dict, column_mapping, 'state')),
+                    'relevance_score': self._calculate_relevance_dynamic(query, row_dict, column_mapping),
+                    'raw_data': row_dict  # Keep original for debugging
+                }
+                
+                # Only add if has some content
+                if mapped_result['element_content'] and len(mapped_result['element_content'].strip()) > 20:
+                    processed_results.append(mapped_result)
             
-            # Sort by combined score
+            # Sort by relevance and active status
             processed_results.sort(
-                key=lambda x: (x['is_active'], x['relevance_score'], x['element_priority']), 
+                key=lambda x: (x['is_active'], x['relevance_score']), 
                 reverse=True
             )
+            
+            st.success(f"✅ Processed {len(processed_results)} valid results")
             
             return processed_results
             
@@ -247,13 +357,53 @@ class VBPLDatabase:
             st.code(traceback.format_exc())
             return []
     
+    def _build_column_mapping(self) -> Dict[str, Optional[str]]:
+        """Build mapping từ standard fields to actual columns"""
+        column_mapping = {}
+        
+        # Field mapping definitions
+        field_mappings = {
+            'id': ['id', 'element_id', 'row_id', 'rowid', '_id'],
+            'type': ['type', 'element_type', 'category', 'kind'],
+            'number': ['number', 'element_number', 'section_number', 'article_number', 'clause_number'],
+            'name': ['name', 'element_name', 'title', 'heading', 'subject'],
+            'content': ['content', 'element_content', 'text', 'body', 'description', 'full_text'],
+            'document': ['document', 'document_number', 'doc_number', 'source', 'doc_id'],
+            'doc_name': ['document_name', 'doc_name', 'source_name', 'title'],
+            'state': ['state', 'status', 'document_state', 'active', 'valid']
+        }
+        
+        for standard_field, possible_columns in field_mappings.items():
+            found_column = None
+            for col in possible_columns:
+                if col in self.content_columns:
+                    found_column = col
+                    break
+            
+            # Fallback: use first text column for content/name fields
+            if not found_column and standard_field in ['content', 'name']:
+                if self.text_columns:
+                    found_column = self.text_columns[0]
+            
+            column_mapping[standard_field] = found_column
+        
+        return column_mapping
+    
+    def _safe_get_field(self, row_dict: Dict, column_mapping: Dict, field: str) -> str:
+        """Safely get field value từ row"""
+        column = column_mapping.get(field)
+        if column and column in row_dict:
+            value = row_dict[column]
+            return str(value) if value is not None else ''
+        return ''
+    
     def _extract_smart_keywords(self, query: str) -> List[str]:
         """Extract smart keywords từ query với Vietnamese support"""
         # Vietnamese stop words
         stop_words = {
             'là', 'của', 'và', 'có', 'được', 'theo', 'trong', 'về', 'khi', 'nào', 'gì', 'như', 'thế',
             'với', 'để', 'cho', 'từ', 'tại', 'trên', 'dưới', 'này', 'đó', 'những', 'các', 'một',
-            'hai', 'ba', 'bốn', 'năm', 'sáu', 'bảy', 'tám', 'chín', 'mười'
+            'hai', 'ba', 'bốn', 'năm', 'sáu', 'bảy', 'tám', 'chín', 'mười', 'bị', 'sẽ', 'đã'
         }
         
         # Normalize và tokenize
@@ -270,31 +420,31 @@ class VBPLDatabase:
                 and len(words[i]) > 2 and len(words[i+1]) > 2):
                 bigrams.append(f"{words[i]} {words[i+1]}")
         
-        # Combine và prioritize
-        all_keywords = keywords[:4] + bigrams[:2]  # Limit để avoid quá complex
+        # Combine và limit để avoid quá complex queries
+        all_keywords = keywords[:4] + bigrams[:2]
         
         return all_keywords
     
-    def _calculate_relevance(self, query: str, content: Dict) -> float:
-        """Calculate relevance score cho search result"""
+    def _calculate_relevance_dynamic(self, query: str, row_dict: Dict, column_mapping: Dict) -> float:
+        """Calculate relevance với dynamic column mapping"""
         score = 0.0
         query_lower = query.lower()
         
-        # Text fields với weights khác nhau
-        text_fields = [
-            (content.get('element_content', ''), 0.4),  # Content cao nhất
-            (content.get('element_name', ''), 0.25),    # Tên element
-            (content.get('document_name', ''), 0.15),   # Tên document  
-            (content.get('element_number', ''), 0.1),   # Số điều/khoản
-            (content.get('document_number', ''), 0.1)   # Số văn bản
-        ]
+        # Score based on available mapped columns
+        field_weights = {
+            'content': 0.4,
+            'name': 0.25,
+            'doc_name': 0.15,
+            'number': 0.1,
+            'document': 0.1
+        }
         
-        # Calculate text matching score
-        for text, weight in text_fields:
+        for field, weight in field_weights.items():
+            text = self._safe_get_field(row_dict, column_mapping, field)
             if text:
                 text_lower = text.lower()
                 
-                # Exact phrase match
+                # Exact match
                 if query_lower in text_lower:
                     score += weight
                 
@@ -306,23 +456,19 @@ class VBPLDatabase:
                     overlap_ratio = overlap / len(query_words)
                     score += (overlap_ratio * weight * 0.5)
         
-        # Bonus for active documents
-        if self._is_document_active(content.get('document_state', '')):
+        # Active document bonus
+        state = self._safe_get_field(row_dict, column_mapping, 'state')
+        if self._is_document_active(state):
             score += 0.15
         
-        # Bonus for important element types
-        element_type = content.get('element_type', '')
-        if element_type == 'vbpl_section':
-            score += 0.1
-        elif element_type == 'vbpl_clause':
-            score += 0.05
-        
-        # Content length bonus (longer = more detailed)
-        content_length = len(content.get('element_content', ''))
-        if content_length > 500:
-            score += 0.05
-        elif content_length > 200:
-            score += 0.02
+        # Content length bonus
+        content = self._safe_get_field(row_dict, column_mapping, 'content')
+        if content:
+            content_length = len(content)
+            if content_length > 500:
+                score += 0.05
+            elif content_length > 200:
+                score += 0.02
         
         return min(score, 1.0)
     
@@ -332,14 +478,26 @@ class VBPLDatabase:
             return False
         
         state_lower = state.lower()
-        active_indicators = ['còn hiệu lực', 'có hiệu lực', 'hiện hành']
-        return any(indicator in state_lower for indicator in active_indicators)
+        active_indicators = ['còn hiệu lực', 'có hiệu lực', 'hiện hành', 'active', 'valid', 'current']
+        inactive_indicators = ['hết hiệu lực', 'không hiệu lực', 'inactive', 'expired', 'invalid']
+        
+        # Check for active indicators
+        if any(indicator in state_lower for indicator in active_indicators):
+            return True
+        
+        # Check for inactive indicators
+        if any(indicator in state_lower for indicator in inactive_indicators):
+            return False
+        
+        # Default: assume active if state is not clearly inactive
+        return True
     
     def close(self):
         """Close database connection"""
         if self.conn:
             self.conn.close()
             self.available = False
+            self.content_table = None
 
 class VBPLOpenAIProcessor:
     """OpenAI processor cho VBPL content với professional prompting"""
