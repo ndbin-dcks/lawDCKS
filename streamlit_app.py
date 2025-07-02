@@ -1,13 +1,13 @@
 import streamlit as st
 from openai import OpenAI
-import requests
+import sqlite3
 import json
 from datetime import datetime
 import re
-from urllib.parse import quote
 import time
 import os
-import traceback
+from typing import Dict, List, Optional, Any
+from dataclasses import dataclass
 
 # Cấu hình trang
 st.set_page_config(
@@ -17,7 +17,8 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Model pricing (USD per 1K tokens)
+# =================== CONFIGURATIONS ===================
+
 MODEL_PRICING = {
     "gpt-4o-mini": {"input": 0.00015, "output": 0.0006},
     "gpt-3.5-turbo": {"input": 0.0015, "output": 0.002},
@@ -25,8 +26,525 @@ MODEL_PRICING = {
     "gpt-4-turbo-preview": {"input": 0.01, "output": 0.03}
 }
 
+@dataclass
+class VBPLConfig:
+    """Cấu hình cho VBPL integration"""
+    vbpl_db_path: str = "vbpl.db"
+    model: str = "gpt-4o-mini"
+    max_tokens: int = 1500
+    temperature: float = 0.1
+    max_search_results: int = 5
+    domain_focus: str = "khoáng sản"
+    prioritize_active_docs: bool = True
+
+# =================== VBPL DATABASE INTEGRATION ===================
+
+class VBPLDatabase:
+    """Database manager cho VBPL với Streamlit integration"""
+    
+    def __init__(self, config: VBPLConfig):
+        self.config = config
+        self.conn = None
+        self.available = False
+        self._init_connection()
+    
+    def _init_connection(self):
+        """Initialize database connection"""
+        try:
+            if not os.path.exists(self.config.vbpl_db_path):
+                st.sidebar.warning(f"⚠️ Database file không tồn tại: {self.config.vbpl_db_path}")
+                return False
+            
+            self.conn = sqlite3.connect(self.config.vbpl_db_path, check_same_thread=False)
+            self.conn.row_factory = sqlite3.Row
+            self.available = True
+            
+            # Analyze database structure
+            self._analyze_database()
+            return True
+            
+        except Exception as e:
+            st.sidebar.error(f"❌ Lỗi kết nối database: {e}")
+            return False
+    
+    def _analyze_database(self):
+        """Phân tích cấu trúc database và hiển thị stats"""
+        try:
+            cursor = self.conn.cursor()
+            
+            # Check tables exist
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            tables = [row[0] for row in cursor.fetchall()]
+            
+            st.sidebar.success(f"✅ VBPL Database Online")
+            st.sidebar.caption(f"📊 {len(tables)} tables detected")
+            
+            # Check for expected tables
+            expected_tables = ['documents', 'vbpl_content']
+            missing_tables = [t for t in expected_tables if t not in tables]
+            
+            if missing_tables:
+                st.sidebar.warning(f"⚠️ Missing tables: {missing_tables}")
+            
+            # Analyze document distribution if documents table exists
+            if 'documents' in tables:
+                cursor.execute("SELECT state, COUNT(*) FROM documents GROUP BY state ORDER BY COUNT(*) DESC")
+                status_dist = cursor.fetchall()
+                
+                with st.sidebar.expander("📊 Database Statistics", expanded=False):
+                    total_docs = sum(count for _, count in status_dist)
+                    st.metric("Total Documents", f"{total_docs:,}")
+                    
+                    for status, count in status_dist[:5]:  # Top 5 statuses
+                        percentage = (count / total_docs) * 100
+                        st.metric(status, f"{count:,} ({percentage:.1f}%)")
+            
+            # Check vbpl_content table
+            if 'vbpl_content' in tables:
+                cursor.execute("SELECT COUNT(*) FROM vbpl_content")
+                content_count = cursor.fetchone()[0]
+                st.sidebar.metric("Legal Content Items", f"{content_count:,}")
+                
+                # Check domain coverage
+                cursor.execute("""
+                    SELECT COUNT(*) FROM vbpl_content 
+                    WHERE LOWER(element_content) LIKE '%khoáng sản%' 
+                    OR LOWER(document_name) LIKE '%khoáng sản%'
+                """)
+                mineral_count = cursor.fetchone()[0]
+                
+                if content_count > 0:
+                    mineral_percentage = (mineral_count / content_count) * 100
+                    st.sidebar.metric("Khoáng sản Content", f"{mineral_count:,} ({mineral_percentage:.1f}%)")
+            
+        except Exception as e:
+            st.sidebar.error(f"❌ Database analysis failed: {e}")
+    
+    def is_available(self) -> bool:
+        """Check if database is available and connected"""
+        return self.available and self.conn is not None
+    
+    def search_domain_specific(self, query: str, max_results: int = 5) -> List[Dict[str, Any]]:
+        """Search database với domain-specific filtering cho khoáng sản"""
+        if not self.is_available():
+            return []
+        
+        try:
+            cursor = self.conn.cursor()
+            keywords = self._extract_smart_keywords(query)
+            
+            if not keywords:
+                st.warning("⚠️ Không thể trích xuất từ khóa từ câu hỏi")
+                return []
+            
+            # Display search info
+            st.write(f"🔍 **Searching for**: {', '.join(keywords[:3])}")
+            
+            # Build search query với domain filtering
+            search_conditions = []
+            params = []
+            
+            # 1. Domain filtering - KHOÁNG SẢN
+            domain_keywords = ['khoáng sản', 'tài nguyên', 'thăm dò', 'khai thác', 'mỏ', 'địa chất']
+            domain_condition = " OR ".join([f"LOWER(element_content) LIKE ?" for _ in domain_keywords])
+            domain_condition += " OR " + " OR ".join([f"LOWER(document_name) LIKE ?" for _ in domain_keywords])
+            
+            search_conditions.append(f"({domain_condition})")
+            params.extend([f"%{kw}%" for kw in domain_keywords])
+            params.extend([f"%{kw}%" for kw in domain_keywords])
+            
+            # 2. Query-specific keywords
+            query_condition = " OR ".join([f"LOWER(element_content) LIKE ?" for _ in keywords])
+            query_condition += " OR " + " OR ".join([f"LOWER(element_name) LIKE ?" for _ in keywords])
+            
+            search_conditions.append(f"({query_condition})")
+            params.extend([f"%{kw}%" for kw in keywords])
+            params.extend([f"%{kw}%" for kw in keywords])
+            
+            # 3. Build final query với prioritization
+            state_priority = """
+                CASE 
+                    WHEN LOWER(document_state) LIKE '%còn hiệu lực%' THEN 3
+                    WHEN LOWER(document_state) LIKE '%có hiệu lực%' THEN 3  
+                    WHEN LOWER(document_state) LIKE '%hết hiệu lực%' THEN 1
+                    ELSE 2 
+                END
+            """
+            
+            # Element type priority
+            element_priority = """
+                CASE 
+                    WHEN element_type = 'vbpl_section' THEN 3
+                    WHEN element_type = 'vbpl_clause' THEN 2
+                    WHEN element_type = 'vbpl_point' THEN 1
+                    ELSE 0
+                END
+            """
+            
+            sql = f"""
+            SELECT 
+                element_id,
+                element_type,
+                element_number,
+                element_name,
+                element_content,
+                document_number,
+                document_name,
+                document_state,
+                {state_priority} as status_priority,
+                {element_priority} as element_priority,
+                LENGTH(element_content) as content_length
+            FROM vbpl_content 
+            WHERE {' AND '.join(search_conditions)}
+            AND element_content IS NOT NULL 
+            AND LENGTH(TRIM(element_content)) > 50
+            ORDER BY 
+                status_priority DESC,
+                element_priority DESC,
+                content_length DESC,
+                element_id
+            LIMIT ?
+            """
+            
+            params.append(max_results)
+            
+            cursor.execute(sql, params)
+            results = cursor.fetchall()
+            
+            st.write(f"📊 **Raw database results**: {len(results)}")
+            
+            # Process results
+            processed_results = []
+            for row in results:
+                relevance_score = self._calculate_relevance(query, dict(row))
+                
+                processed_results.append({
+                    'element_id': row['element_id'],
+                    'element_type': row['element_type'],
+                    'element_number': row['element_number'] or '',
+                    'element_name': row['element_name'] or '',
+                    'element_content': row['element_content'] or '',
+                    'document_number': row['document_number'],
+                    'document_name': row['document_name'],
+                    'document_state': row['document_state'],
+                    'is_active': self._is_document_active(row['document_state']),
+                    'relevance_score': relevance_score,
+                    'status_priority': row['status_priority'],
+                    'element_priority': row['element_priority']
+                })
+            
+            # Sort by combined score
+            processed_results.sort(
+                key=lambda x: (x['is_active'], x['relevance_score'], x['element_priority']), 
+                reverse=True
+            )
+            
+            return processed_results
+            
+        except Exception as e:
+            st.error(f"❌ Database search failed: {e}")
+            import traceback
+            st.code(traceback.format_exc())
+            return []
+    
+    def _extract_smart_keywords(self, query: str) -> List[str]:
+        """Extract smart keywords từ query với Vietnamese support"""
+        # Vietnamese stop words
+        stop_words = {
+            'là', 'của', 'và', 'có', 'được', 'theo', 'trong', 'về', 'khi', 'nào', 'gì', 'như', 'thế',
+            'với', 'để', 'cho', 'từ', 'tại', 'trên', 'dưới', 'này', 'đó', 'những', 'các', 'một',
+            'hai', 'ba', 'bốn', 'năm', 'sáu', 'bảy', 'tám', 'chín', 'mười'
+        }
+        
+        # Normalize và tokenize
+        query_normalized = re.sub(r'[^\w\s]', ' ', query.lower())
+        words = [w.strip() for w in query_normalized.split() if w.strip()]
+        
+        # Filter keywords
+        keywords = [w for w in words if len(w) > 2 and w not in stop_words]
+        
+        # Add important bigrams for better matching
+        bigrams = []
+        for i in range(len(words) - 1):
+            if (words[i] not in stop_words and words[i+1] not in stop_words 
+                and len(words[i]) > 2 and len(words[i+1]) > 2):
+                bigrams.append(f"{words[i]} {words[i+1]}")
+        
+        # Combine và prioritize
+        all_keywords = keywords[:4] + bigrams[:2]  # Limit để avoid quá complex
+        
+        return all_keywords
+    
+    def _calculate_relevance(self, query: str, content: Dict) -> float:
+        """Calculate relevance score cho search result"""
+        score = 0.0
+        query_lower = query.lower()
+        
+        # Text fields với weights khác nhau
+        text_fields = [
+            (content.get('element_content', ''), 0.4),  # Content cao nhất
+            (content.get('element_name', ''), 0.25),    # Tên element
+            (content.get('document_name', ''), 0.15),   # Tên document  
+            (content.get('element_number', ''), 0.1),   # Số điều/khoản
+            (content.get('document_number', ''), 0.1)   # Số văn bản
+        ]
+        
+        # Calculate text matching score
+        for text, weight in text_fields:
+            if text:
+                text_lower = text.lower()
+                
+                # Exact phrase match
+                if query_lower in text_lower:
+                    score += weight
+                
+                # Word overlap
+                query_words = set(query_lower.split())
+                text_words = set(text_lower.split())
+                overlap = len(query_words.intersection(text_words))
+                if len(query_words) > 0:
+                    overlap_ratio = overlap / len(query_words)
+                    score += (overlap_ratio * weight * 0.5)
+        
+        # Bonus for active documents
+        if self._is_document_active(content.get('document_state', '')):
+            score += 0.15
+        
+        # Bonus for important element types
+        element_type = content.get('element_type', '')
+        if element_type == 'vbpl_section':
+            score += 0.1
+        elif element_type == 'vbpl_clause':
+            score += 0.05
+        
+        # Content length bonus (longer = more detailed)
+        content_length = len(content.get('element_content', ''))
+        if content_length > 500:
+            score += 0.05
+        elif content_length > 200:
+            score += 0.02
+        
+        return min(score, 1.0)
+    
+    def _is_document_active(self, state: str) -> bool:
+        """Check if document is currently active"""
+        if not state:
+            return False
+        
+        state_lower = state.lower()
+        active_indicators = ['còn hiệu lực', 'có hiệu lực', 'hiện hành']
+        return any(indicator in state_lower for indicator in active_indicators)
+    
+    def close(self):
+        """Close database connection"""
+        if self.conn:
+            self.conn.close()
+            self.available = False
+
+class VBPLOpenAIProcessor:
+    """OpenAI processor cho VBPL content với professional prompting"""
+    
+    def __init__(self, openai_client: OpenAI, config: VBPLConfig, db_manager: VBPLDatabase):
+        self.client = openai_client
+        self.config = config
+        self.db_manager = db_manager
+    
+    def process_legal_query(self, query: str) -> Dict[str, Any]:
+        """Process legal query với VBPL database"""
+        
+        # Step 1: Search database
+        with st.status("🔍 Đang tìm kiếm trong cơ sở dữ liệu pháp luật VBPL...", expanded=True) as status:
+            
+            search_results = self.db_manager.search_domain_specific(query, self.config.max_search_results)
+            
+            if search_results:
+                active_count = sum(1 for r in search_results if r['is_active'])
+                inactive_count = len(search_results) - active_count
+                
+                st.success(f"✅ Tìm thấy {len(search_results)} kết quả chính xác")
+                st.info(f"📊 {active_count} văn bản còn hiệu lực, {inactive_count} văn bản hết hiệu lực")
+                
+                # Display preview of results
+                for i, result in enumerate(search_results, 1):
+                    status_icon = "✅" if result['is_active'] else "⚠️"
+                    st.write(f"**{i}. {status_icon} {result['element_number']}**")
+                    if result['element_name']:
+                        st.write(f"   📋 {result['element_name'][:80]}...")
+                    st.write(f"   📄 {result['document_number']} ({result['document_state']})")
+                    st.write(f"   🎯 Score: {result['relevance_score']:.2f}")
+                
+                status.update(label="✅ Tìm kiếm VBPL hoàn tất", state="complete")
+            else:
+                st.warning("⚠️ Không tìm thấy kết quả phù hợp trong database VBPL")
+                status.update(label="⚠️ Không tìm thấy kết quả", state="complete")
+        
+        # Step 2: Generate response
+        if search_results:
+            return self._generate_response_with_sources(query, search_results)
+        else:
+            return self._generate_fallback_response(query)
+    
+    def _generate_response_with_sources(self, query: str, search_results: List[Dict]) -> Dict[str, Any]:
+        """Generate response với database sources"""
+        
+        # Create context từ search results
+        context = self._create_structured_context(search_results)
+        
+        # Show context preview
+        with st.expander("📄 Context được gửi đến AI (Click để xem)", expanded=False):
+            st.code(context[:1500] + "..." if len(context) > 1500 else context)
+        
+        # Call OpenAI
+        try:
+            response = self._call_openai_with_vbpl_context(query, context, search_results)
+            
+            return {
+                'response': response,
+                'sources': search_results,
+                'active_sources': sum(1 for r in search_results if r['is_active']),
+                'inactive_sources': sum(1 for r in search_results if not r['is_active']),
+                'total_sources': len(search_results),
+                'method': 'vbpl_database',
+                'success': True
+            }
+            
+        except Exception as e:
+            st.error(f"❌ Lỗi OpenAI API: {e}")
+            return {
+                'response': f"Tôi đã tìm thấy {len(search_results)} quy định liên quan trong cơ sở dữ liệu, nhưng gặp lỗi khi xử lý thông tin. Vui lòng tham khảo trực tiếp các quy định sau hoặc liên hệ cơ quan có thẩm quyền.",
+                'sources': search_results,
+                'method': 'vbpl_database_error',
+                'success': False
+            }
+    
+    def _generate_fallback_response(self, query: str) -> Dict[str, Any]:
+        """Generate fallback response khi không có database results"""
+        
+        fallback_response = """Tôi không tìm thấy thông tin cụ thể về vấn đề này trong cơ sở dữ liệu pháp luật hiện có. 
+
+🔍 **Để có thông tin chính xác nhất, bạn vui lòng:**
+
+1. **Tham khảo trực tiếp** tại thuvienphapluat.vn
+2. **Liên hệ** Sở Tài nguyên và Môi trường địa phương  
+3. **Tham khảo** Luật Khoáng sản hiện hành và các nghị định hướng dẫn
+4. **Liên hệ** hotline tư vấn pháp luật của Bộ Tư pháp
+
+💡 **Gợi ý**: Thử diễn đạt câu hỏi khác hoặc sử dụng từ khóa cụ thể hơn về lĩnh vực khoáng sản."""
+
+        return {
+            'response': fallback_response,
+            'sources': [],
+            'method': 'vbpl_database_empty',
+            'success': False
+        }
+    
+    def _create_structured_context(self, results: List[Dict]) -> str:
+        """Create structured context từ VBPL database results"""
+        
+        context = "=== THÔNG TIN TỪ CƠ SỞ DỮ LIỆU PHÁP LUẬT VBPL ===\n\n"
+        
+        # Group by document status
+        active_results = [r for r in results if r['is_active']]
+        inactive_results = [r for r in results if not r['is_active']]
+        
+        if active_results:
+            context += "📋 **QUY ĐỊNH CÒN HIỆU LỰC (Ưu tiên sử dụng):**\n\n"
+            for i, result in enumerate(active_results, 1):
+                context += self._format_result_for_context(result, i, "✅")
+        
+        if inactive_results:
+            context += "\n📋 **QUY ĐỊNH HẾT HIỆU LỰC (Chỉ tham khảo):**\n\n"
+            for i, result in enumerate(inactive_results, 1):
+                context += self._format_result_for_context(result, i, "⚠️")
+        
+        return context
+    
+    def _format_result_for_context(self, result: Dict, index: int, status_icon: str) -> str:
+        """Format single result cho context"""
+        
+        entry = f"Nguồn {index} {status_icon}:\n"
+        entry += f"• **Văn bản**: {result['document_number']} - {result['document_name']}\n"
+        entry += f"• **Trạng thái**: {result['document_state']}\n"
+        entry += f"• **Điều khoản**: {result['element_number']}"
+        
+        if result['element_name']:
+            entry += f" - {result['element_name']}\n"
+        else:
+            entry += "\n"
+        
+        # Clean và format content
+        content = result['element_content'].strip()
+        if len(content) > 800:
+            content = content[:800] + "..."
+        
+        entry += f"• **Nội dung**: {content}\n"
+        entry += f"• **Độ liên quan**: {result['relevance_score']:.2f}\n"
+        entry += "---\n\n"
+        
+        return entry
+    
+    def _call_openai_with_vbpl_context(self, query: str, context: str, sources: List[Dict]) -> str:
+        """Call OpenAI với VBPL context và professional prompting"""
+        
+        # Count sources
+        active_sources = sum(1 for s in sources if s['is_active'])
+        inactive_sources = len(sources) - active_sources
+        
+        # Professional system prompt cho khoáng sản
+        system_prompt = """Bạn là chuyên gia pháp luật KHOÁNG SẢN Việt Nam với chuyên môn sâu về quy định pháp luật.
+
+🎯 **NHIỆM VỤ CHÍNH**:
+- Trả lời DỰA TRÊN quy định pháp luật khoáng sản từ cơ sở dữ liệu VBPL
+- Ưu tiên tuyệt đối QUY ĐỊNH CÒN HIỆU LỰC (✅) hơn quy định hết hiệu lực (⚠️)
+- Trích dẫn CHÍNH XÁC điều, khoản, điểm từ văn bản pháp luật
+- Giải thích THỰC TIỄN và dễ hiểu cho doanh nghiệp/cá nhân
+
+🚫 **NGHIÊM CẤM**:
+- Suy luận hoặc diễn giải khi không có thông tin trực tiếp
+- Sử dụng quy định HẾT HIỆU LỰC khi đã có quy định CÒN HIỆU LỰC
+- Trích dẫn điều luật không trực tiếp liên quan đến câu hỏi
+- Bịa đặt thông tin không có trong cơ sở dữ liệu
+
+📋 **FORMAT CHUẨN**:
+**🔍 Trả lời**: [Câu trả lời trực tiếp và rõ ràng]
+
+**⚖️ Căn cứ pháp lý**: 
+[Trích dẫn cụ thể với trạng thái hiệu lực]
+
+**💡 Lưu ý thực tiễn**: [Nếu cần thiết]
+
+**📌 Khuyến nghị**: [Hướng dẫn thực hiện hoặc tham khảo thêm]
+
+🎯 **DOMAIN**: CHỈ về KHOÁNG SẢN - không áp dụng cho lĩnh vực khác."""
+
+        user_prompt = f"""❓ **Câu hỏi**: {query}
+
+📊 **Nguồn từ Database VBPL**: {active_sources} quy định còn hiệu lực + {inactive_sources} quy định hết hiệu lực
+
+{context}
+
+🎯 **Yêu cầu**: Trả lời dựa trên cơ sở dữ liệu VBPL trên, TUYỆT ĐỐI ưu tiên quy định CÒN HIỆU LỰC."""
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.config.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                max_tokens=self.config.max_tokens,
+                temperature=self.config.temperature
+            )
+            
+            return response.choices[0].message.content.strip()
+            
+        except Exception as e:
+            raise Exception(f"OpenAI API call failed: {e}")
+
+# =================== STREAMLIT CORE FUNCTIONS ===================
+
 def init_session_state():
-    """Khởi tạo session state an toàn"""
+    """Khởi tạo session state"""
     if "token_stats" not in st.session_state:
         st.session_state.token_stats = {
             "total_input_tokens": 0,
@@ -38,42 +556,67 @@ def init_session_state():
     
     if "messages" not in st.session_state:
         st.session_state.messages = [
-            {"role": "system", "content": get_strict_system_prompt()},
+            {"role": "system", "content": get_system_prompt()},
             {"role": "assistant", "content": get_welcome_message()}
         ]
 
-def safe_get_stats():
-    """Lấy stats một cách an toàn"""
+def get_system_prompt():
+    """Get system prompt từ file hoặc default"""
     try:
-        init_session_state()
-        stats = st.session_state.token_stats
-        total_tokens = stats["total_input_tokens"] + stats["total_output_tokens"]
-        
-        return {
-            "total_tokens": total_tokens,
-            "input_tokens": stats["total_input_tokens"],
-            "output_tokens": stats["total_output_tokens"],
-            "total_cost_usd": stats["total_cost"],
-            "total_cost_vnd": stats["total_cost"] * 24000,
-            "requests": stats["request_count"],
-            "session_duration": datetime.now() - stats["session_start"]
-        }
-    except Exception as e:
-        return {
-            "total_tokens": 0,
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "total_cost_usd": 0.0,
-            "total_cost_vnd": 0.0,
-            "requests": 0,
-            "session_duration": datetime.now() - datetime.now()
-        }
+        with open("01.system_trainning.txt", "r", encoding="utf-8") as file:
+            return file.read()
+    except FileNotFoundError:
+        return """Bạn là chuyên gia pháp chế về quản lý nhà nước trong lĩnh vực khoáng sản tại Việt Nam, được hỗ trợ bởi cơ sở dữ liệu pháp luật VBPL chuyên nghiệp."""
+
+def get_welcome_message():
+    """Get welcome message"""
+    try:
+        with open("02.assistant.txt", "r", encoding="utf-8") as file:
+            return file.read()
+    except FileNotFoundError:
+        return """Xin chào! ⚖️ 
+
+Tôi là **Trợ lý Pháp chế chuyên về Khoáng sản** được hỗ trợ bởi **cơ sở dữ liệu pháp luật VBPL**.
+
+🗄️ **Tôi có thể tìm kiếm chính xác trong hệ thống pháp luật về:**
+- Luật Khoáng sản và các văn bản hướng dẫn
+- Thủ tục cấp phép thăm dò, khai thác
+- Thuế, phí liên quan đến khoáng sản  
+- Xử phạt vi phạm hành chính
+- Bảo vệ môi trường trong hoạt động khoáng sản
+
+💡 **Hãy đặt câu hỏi cụ thể để tôi tìm kiếm chính xác trong database!**"""
+
+def get_default_model():
+    """Get default model"""
+    try:
+        with open("module_chatgpt.txt", "r", encoding="utf-8") as file:
+            return file.read().strip()
+    except FileNotFoundError:
+        return "gpt-4o-mini"
+
+def is_mineral_related(message):
+    """Check if message is mineral-related"""
+    mineral_keywords = [
+        'khoáng sản', 'khai thác', 'thăm dò', 'đá', 'cát', 'sỏi',
+        'than', 'quặng', 'kim loại', 'phi kim loại', 'khoáng',
+        'luật khoáng sản', 'giấy phép', 'cấp phép', 'thuế tài nguyên',
+        'phí thăm dò', 'tiền cấp quyền', 'vi phạm hành chính',
+        'bộ tài nguyên', 'sở tài nguyên', 'monre', 'tn&mt',
+        'mỏ', 'mỏ đá', 'mỏ cát', 'mỏ than', 'quarry', 'mining',
+        'thu hồi giấy phép', 'gia hạn', 'đóng cửa mỏ'
+    ]
+    
+    message_lower = message.lower()
+    return any(keyword in message_lower for keyword in mineral_keywords)
+
+def count_tokens(text):
+    """Estimate token count"""
+    return len(str(text)) // 4
 
 def update_stats(input_tokens, output_tokens, model):
-    """Cập nhật stats an toàn"""
+    """Update token statistics"""
     try:
-        init_session_state()
-        
         if model not in MODEL_PRICING:
             model = "gpt-4o-mini"
         
@@ -86,810 +629,93 @@ def update_stats(input_tokens, output_tokens, model):
         st.session_state.token_stats["request_count"] += 1
         
     except Exception as e:
-        st.error(f"Lỗi cập nhật stats: {e}")
+        st.error(f"Error updating stats: {e}")
 
-def count_tokens(text):
-    """Ước tính số token đơn giản"""
-    return len(str(text)) // 4
+# =================== VBPL SYSTEM INITIALIZATION ===================
 
-def get_strict_system_prompt():
-    """System prompt nghiêm ngặt ngăn hallucination"""
-    try:
-        with open("01.system_trainning.txt", "r", encoding="utf-8") as file:
-            base_prompt = file.read()
-            # Thêm strict instructions vào cuối
-            return base_prompt + """
-
-🚫 HƯỚNG DẪN NGHIÊM NGẶT BỔ SUNG:
-
-TUYỆT ĐỐI KHÔNG ĐƯỢC:
-1. Bịa đặt số luật, số điều, số khoản nếu không có trong thông tin tìm kiếm
-2. Trích dẫn cụ thể các điều khoản pháp luật mà không có nguồn xác thực
-3. Đưa ra thông tin chi tiết về nội dung luật nếu không chắc chắn 100%
-4. Sử dụng kiến thức cũ về pháp luật mà không có xác nhận từ nguồn hiện tại
-
-CHỈ ĐƯỢC:
-1. Trích dẫn thông tin CÓ TRONG kết quả tìm kiếm được cung cấp
-2. Đưa ra các nguyên tắc chung về pháp luật khoáng sản
-3. Hướng dẫn người hỏi tham khảo nguồn chính thống
-4. Nói rõ khi thông tin không đầy đủ hoặc cần kiểm tra thêm
-
-LUÔN ưu tiên an toàn thông tin hơn việc đưa ra câu trả lời chi tiết."""
-            
-    except FileNotFoundError:
-        return """Bạn là chuyên gia pháp chế về quản lý nhà nước trong lĩnh vực khoáng sản tại Việt Nam.
-
-⚖️ NGUYÊN TẮC LÀM VIỆC NGHIÊM NGẶT:
-
-🚫 TUYỆT ĐỐI KHÔNG ĐƯỢC:
-1. Bịa đặt số luật, số điều, số khoản nếu không có trong thông tin tìm kiếm
-2. Trích dẫn cụ thể các điều khoản pháp luật mà không có nguồn xác thực
-3. Đưa ra thông tin chi tiết về nội dung luật nếu không chắc chắn 100%
-4. Sử dụng kiến thức cũ về pháp luật mà không có xác nhận từ nguồn hiện tại
-
-✅ CHỈ ĐƯỢC:
-1. Trích dẫn thông tin CÓ TRONG kết quả tìm kiếm được cung cấp
-2. Đưa ra các nguyên tắc chung về pháp luật khoáng sản
-3. Hướng dẫn người hỏi tham khảo nguồn chính thống
-4. Nói rõ khi thông tin không đầy đủ hoặc cần kiểm tra thêm
-
-🎯 CÁCH TRẢ LỜI AN TOÀN:
-- Khi có thông tin từ search: "Dựa theo thông tin tìm kiếm từ [nguồn]..."
-- Khi không chắc chắn: "Thông tin này cần được kiểm tra tại thuvienphapluat.vn"
-- Khi thông tin không đủ: "Tôi không có đủ thông tin chính xác để trả lời chi tiết"
-
-QUAN TRỌNG: An toàn thông tin pháp luật quan trọng hơn việc đưa ra câu trả lời chi tiết."""
-
-def get_welcome_message():
-    """Lấy tin nhắn chào mừng"""
-    try:
-        with open("02.assistant.txt", "r", encoding="utf-8") as file:
-            return file.read()
-    except FileNotFoundError:
-        return """Xin chào! ⚖️ 
-
-Tôi là **Trợ lý Pháp chế chuyên về Quản lý Nhà nước trong lĩnh vực Khoáng sản tại Việt Nam**.
-
-🏔️ **Tôi có thể hỗ trợ bạn về:**
-
-✅ **Pháp luật Khoáng sản:**
-   • Luật Khoáng sản và các văn bản hướng dẫn
-   • Nghị định, Thông tư của Bộ Tài nguyên và Môi trường
-
-✅ **Thủ tục hành chính:**
-   • Cấp Giấy phép thăm dò, khai thác khoáng sản
-   • Gia hạn, sửa đổi, bổ sung giấy phép
-   • Thủ tục đóng cửa mỏ
-
-🎯 **Lưu ý quan trọng:** 
-Tôi chỉ tư vấn về lĩnh vực **Khoáng sản**. Để có thông tin chính xác nhất, bạn nên tham khảo trực tiếp tại **thuvienphapluat.vn**.
-
-**Bạn có thắc mắc gì về pháp luật Khoáng sản không?** 🤔"""
-
-def get_default_model():
-    """Lấy model mặc định"""
-    try:
-        with open("module_chatgpt.txt", "r", encoding="utf-8") as file:
-            return file.read().strip()
-    except FileNotFoundError:
-        return "gpt-4o-mini"
-
-def is_mineral_related(message):
-    """Kiểm tra câu hỏi có liên quan đến khoáng sản không"""
-    mineral_keywords = [
-        'khoáng sản', 'khai thác', 'thăm dò', 'đá', 'cát', 'sỏi',
-        'than', 'quặng', 'kim loại', 'phi kim loại', 'khoáng',
-        'luật khoáng sản', 'giấy phép', 'cấp phép', 'thuế tài nguyên',
-        'phí thăm dò', 'tiền cấp quyền', 'vi phạm hành chính',
-        'bộ tài nguyên', 'sở tài nguyên', 'monre', 'tn&mt',
-        'mỏ', 'mỏ đá', 'mỏ cát', 'mỏ than', 'quarry', 'mining',
-        'thu hồi giấy phép'
-    ]
-    
-    message_lower = message.lower()
-    return any(keyword in message_lower for keyword in mineral_keywords)
-
-def should_search_web(message):
-    """Kiểm tra có cần tìm kiếm web không"""
-    search_indicators = [
-        'mới nhất', 'cập nhật', 'hiện hành', 'ban hành', 'sửa đổi',
-        'bổ sung', 'thay thế', 'có hiệu lực', 'quy định mới',
-        'nghị định', 'thông tư', 'luật', 'pháp luật', 'điều',
-        'khi nào', 'trường hợp nào', 'điều kiện', 'thu hồi'
-    ]
-    
-    message_lower = message.lower()
-    return (is_mineral_related(message) and 
-            any(indicator in message_lower for indicator in search_indicators))
-
-# =================== SEARCH FUNCTIONS ===================
-
-def is_high_quality_legal_content(title, content, url=""):
-    """Kiểm tra nội dung có phải văn bản pháp luật chất lượng cao không"""
-    
-    # 1. Kiểm tra nguồn uy tín
-    trusted_domains = ['thuvienphapluat.vn', 'monre.gov.vn', 'moj.gov.vn', 'chinhphu.vn']
-    is_trusted_source = any(domain in url.lower() for domain in trusted_domains)
-    
-    # 2. Kiểm tra cấu trúc văn bản pháp luật
-    legal_structure_patterns = [
-        r'(?:luật|nghị định|thông tư|quyết định)\s+(?:số\s*)?\d+',
-        r'điều\s+\d+',
-        r'khoản\s+\d+',
-        r'chương\s+[ivx\d]+',
-        r'mục\s+\d+'
-    ]
-    
-    text = (title + ' ' + content).lower()
-    has_legal_structure = sum(1 for pattern in legal_structure_patterns 
-                            if re.search(pattern, text)) >= 2
-    
-    # 3. Kiểm tra từ khóa khoáng sản cụ thể
-    mineral_legal_terms = [
-        'luật khoáng sản', 'khai thác khoáng sản', 'thăm dò khoáng sản',
-        'giấy phép khai thác', 'giấy phép thăm dò', 'thuế tài nguyên',
-        'bộ tài nguyên', 'sở tài nguyên', 'thu hồi giấy phép'
-    ]
-    
-    has_mineral_terms = any(term in text for term in mineral_legal_terms)
-    
-    # 4. Loại bỏ nội dung spam/không phù hợp
-    spam_indicators = ['quảng cáo', 'bán hàng', 'tuyển dụng', '404', 'error']
-    has_spam = any(spam in text for spam in spam_indicators)
-    
-    # 5. Kiểm tra độ dài nội dung
-    has_sufficient_content = len(content.strip()) > 100
-    
-    # Tính điểm tổng
-    score = 0
-    if is_trusted_source: score += 3
-    if has_legal_structure: score += 2  
-    if has_mineral_terms: score += 2
-    if has_sufficient_content: score += 1
-    if has_spam: score -= 3
-    
-    return score >= 4
-
-def calculate_improved_confidence(query, title, content, url=""):
-    """Tính confidence score cải tiến với nhiều yếu tố"""
-    
-    confidence = 0.0
-    query_lower = query.lower()
-    text_lower = (title + ' ' + content).lower()
-    
-    # 1. Exact phrase matching (25%)
-    if query_lower in text_lower:
-        confidence += 0.25
-    
-    # 2. Word overlap (20%)
-    query_words = set(query_lower.split())
-    text_words = set(text_lower.split())
-    if len(query_words) > 0:
-        overlap_ratio = len(query_words.intersection(text_words)) / len(query_words)
-        confidence += overlap_ratio * 0.20
-    
-    # 3. Legal document indicators (20%)
-    legal_patterns = [
-        (r'luật\s+khoáng sản', 0.15),
-        (r'luật\s+(?:số\s*)?\d+.*khoáng sản', 0.12),
-        (r'nghị định\s+(?:số\s*)?\d+.*khoáng sản', 0.10),
-        (r'thông tư\s+(?:số\s*)?\d+.*khoáng sản', 0.08),
-        (r'điều\s+\d+', 0.05),
-        (r'khoản\s+\d+', 0.03)
-    ]
-    
-    for pattern, weight in legal_patterns:
-        if re.search(pattern, text_lower):
-            confidence += weight
-            break  # Chỉ tính pattern có trọng số cao nhất
-    
-    # 4. Source reliability (20%)
-    source_scores = {
-        'thuvienphapluat.vn': 0.20,
-        'monre.gov.vn': 0.18,
-        'chinhphu.vn': 0.15,
-        'moj.gov.vn': 0.12,
-        'gov.vn': 0.08
-    }
-    
-    for domain, score in source_scores.items():
-        if domain in url.lower():
-            confidence += score
-            break
-    
-    # 5. Title relevance bonus (10%)
-    title_words = set(title.lower().split())
-    title_overlap = len(query_words.intersection(title_words)) / len(query_words) if query_words else 0
-    confidence += title_overlap * 0.10
-    
-    # 6. Content quality (5%)
-    if len(content) > 200:
-        confidence += 0.05
-    elif len(content) > 100:
-        confidence += 0.025
-    
-    # Penalties
-    if any(spam in text_lower for spam in ['404', 'error', 'không tìm thấy']):
-        confidence *= 0.3
-    
-    return min(confidence, 1.0)
-
-def extract_document_type(title):
-    """Trích xuất loại văn bản từ tiêu đề"""
-    title_lower = title.lower()
-    
-    if re.search(r'luật\s+(?:số\s*)?\d+', title_lower):
-        return 'Luật'
-    elif re.search(r'nghị định\s+(?:số\s*)?\d+', title_lower):
-        return 'Nghị định'
-    elif re.search(r'thông tư\s+(?:số\s*)?\d+', title_lower):
-        return 'Thông tư'
-    elif re.search(r'quyết định\s+(?:số\s*)?\d+', title_lower):
-        return 'Quyết định'
-    else:
-        return 'Văn bản'
-
-def remove_duplicate_results(results):
-    """Loại bỏ kết quả trùng lặp"""
-    unique_results = []
-    seen_urls = set()
-    seen_titles = set()
-    
-    for result in results:
-        url = result.get('url', '')
-        title = result.get('title', '').lower().strip()
+def init_vbpl_system():
+    """Initialize VBPL system"""
+    if 'vbpl_system' not in st.session_state:
+        config = VBPLConfig()
+        db_manager = VBPLDatabase(config)
         
-        # Skip if URL or title already seen
-        if url in seen_urls or title in seen_titles:
-            continue
-            
-        # Skip if title too similar to existing ones
-        is_duplicate = False
-        for seen_title in seen_titles:
-            if calculate_string_similarity(title, seen_title) > 0.8:
-                is_duplicate = True
-                break
-        
-        if not is_duplicate:
-            seen_urls.add(url)
-            seen_titles.add(title)
-            unique_results.append(result)
-    
-    return unique_results
-
-def calculate_string_similarity(str1, str2):
-    """Tính similarity giữa 2 string"""
-    if not str1 or not str2:
-        return 0.0
-    
-    words1 = set(str1.split())
-    words2 = set(str2.split())
-    
-    if not words1 or not words2:
-        return 0.0
-    
-    intersection = len(words1.intersection(words2))
-    union = len(words1.union(words2))
-    
-    return intersection / union if union > 0 else 0.0
-# Thay thế hàm advanced_web_search_improved() trong streamlit_app.py
-
-def advanced_web_search_improved_v2(query, max_results=5):
-    """Fixed web search - không dùng site restriction"""
-    results = []
-    
-    try:
-        # Strategy 1: General Vietnamese legal queries (NO site: restriction)
-        search_queries = [
-            f'"{query}" luật khoáng sản Việt Nam',
-            f'"{query}" nghị định khoáng sản',
-            f'luật khoáng sản "{query}" thuvienphapluat',
-            f'khoáng sản "{query}" quy định pháp luật',
-            f'"{query}" bộ tài nguyên môi trường'
-        ]
-        
-        for search_query in search_queries:
-            if len(results) >= max_results:
-                break
-                
+        if db_manager.is_available():
             try:
-                # Remove site: restrictions, use general search
-                params = {
-                    'q': search_query,
-                    'format': 'json',
-                    'no_html': '1',
-                    'skip_disambig': '1',
-                    'safe_search': 'moderate'
+                client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+                openai_processor = VBPLOpenAIProcessor(client, config, db_manager)
+                
+                st.session_state.vbpl_system = {
+                    'config': config,
+                    'db_manager': db_manager,
+                    'openai_processor': openai_processor,
+                    'available': True
                 }
                 
-                response = requests.get("https://api.duckduckgo.com/", 
-                                      params=params, timeout=10)
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    
-                    # Debug: Show what we got
-                    st.write(f"🔍 **Query:** {search_query}")
-                    st.write(f"📊 **Abstract:** {'✅' if data.get('Abstract') else '❌'}")
-                    st.write(f"🔗 **RelatedTopics:** {len(data.get('RelatedTopics', []))}")
-                    
-                    # Process Abstract với relaxed validation
-                    if data.get('Abstract') and len(data['Abstract']) > 30:
-                        title = data.get('AbstractText', 'Thông tin pháp luật')
-                        content = data.get('Abstract')
-                        url = data.get('AbstractURL', '')
-                        
-                        # Relaxed validation for Vietnamese content
-                        if is_vietnamese_legal_content(title, content, url):
-                            confidence = calculate_vietnamese_confidence(query, title, content, url)
-                            
-                            results.append({
-                                'title': title,
-                                'content': content,
-                                'url': url,
-                                'source': determine_source(url),
-                                'priority': is_priority_source(url),
-                                'confidence': confidence,
-                                'document_type': extract_document_type(title),
-                                'method': 'duckduckgo_abstract'
-                            })
-                            
-                            st.success(f"✅ **Found Abstract Result** (Confidence: {confidence:.2f})")
-                    
-                    # Process RelatedTopics với relaxed filtering
-                    for i, topic in enumerate(data.get('RelatedTopics', [])):
-                        if len(results) >= max_results:
-                            break
-                            
-                        if isinstance(topic, dict) and topic.get('Text'):
-                            title = topic.get('Text', '')[:100]
-                            content = topic.get('Text', '')
-                            url = topic.get('FirstURL', '')
-                            
-                            if (len(content) > 50 and 
-                                is_vietnamese_legal_content(title, content, url)):
-                                
-                                confidence = calculate_vietnamese_confidence(query, title, content, url)
-                                
-                                results.append({
-                                    'title': title + '...',
-                                    'content': content,
-                                    'url': url,
-                                    'source': determine_source(url),
-                                    'priority': is_priority_source(url),
-                                    'confidence': confidence,
-                                    'document_type': extract_document_type(title),
-                                    'method': 'duckduckgo_related'
-                                })
-                                
-                                st.success(f"✅ **Found Related Topic {i+1}** (Confidence: {confidence:.2f})")
-                
-                time.sleep(0.8)  # Longer delay to avoid rate limiting
-                
             except Exception as e:
-                st.warning(f"⚠️ Query failed: {search_query} - Error: {e}")
-                continue
-    
-    except Exception as e:
-        st.error(f"❌ Search failed completely: {e}")
-    
-    # If still no results, try backup strategy
-    if not results:
-        st.warning("🔄 **Trying backup search strategy...**")
-        results = backup_search_strategy(query)
-    
-    # Remove duplicates và sort
-    unique_results = remove_duplicate_results(results)
-    unique_results.sort(
-        key=lambda x: (x.get('priority', False), x.get('confidence', 0)), 
-        reverse=True
-    )
-    
-    return unique_results[:max_results]
-
-def is_vietnamese_legal_content(title, content, url=""):
-    """Relaxed validation cho Vietnamese legal content"""
-    
-    text = (title + ' ' + content).lower()
-    
-    # Vietnamese legal keywords (relaxed)
-    legal_keywords = [
-        'luật', 'nghị định', 'thông tư', 'quyết định',
-        'điều', 'khoản', 'quy định', 'pháp luật',
-        'khoáng sản', 'tài nguyên', 'môi trường',
-        'việt nam', 'chính phủ', 'bộ', 'ủy ban'
-    ]
-    
-    # Must have at least 2 legal keywords
-    keyword_count = sum(1 for keyword in legal_keywords if keyword in text)
-    
-    # Vietnamese text indicators
-    vietnamese_chars = ['ă', 'â', 'đ', 'ê', 'ô', 'ơ', 'ư', 'á', 'à', 'ả', 'ã', 'ạ']
-    has_vietnamese = any(char in text for char in vietnamese_chars)
-    
-    # Length check
-    sufficient_length = len(content.strip()) > 50
-    
-    # Negative filters
-    spam_indicators = ['quảng cáo', 'bán hàng', '404', 'error', 'not found']
-    has_spam = any(spam in text for spam in spam_indicators)
-    
-    return keyword_count >= 2 and has_vietnamese and sufficient_length and not has_spam
-
-def calculate_vietnamese_confidence(query, title, content, url=""):
-    """Confidence calculation for Vietnamese content"""
-    
-    confidence = 0.2  # Lower base for general content
-    
-    query_lower = query.lower()
-    text_lower = (title + ' ' + content).lower()
-    
-    # 1. Query word presence (30%)
-    query_words = set(query_lower.split())
-    text_words = set(text_lower.split())
-    if len(query_words) > 0:
-        overlap_ratio = len(query_words.intersection(text_words)) / len(query_words)
-        confidence += overlap_ratio * 0.3
-    
-    # 2. Legal indicators (25%)
-    legal_patterns = [
-        (r'luật.*khoáng sản', 0.2),
-        (r'nghị định.*\d+', 0.15),
-        (r'thông tư.*\d+', 0.1),
-        (r'điều\s+\d+', 0.08),
-        (r'khoản\s+\d+', 0.05)
-    ]
-    
-    for pattern, weight in legal_patterns:
-        if re.search(pattern, text_lower):
-            confidence += weight
-            break
-    
-    # 3. Source bonus (20%)
-    source_scores = {
-        'thuvienphapluat': 0.2,
-        'monre.gov.vn': 0.18,
-        'moj.gov.vn': 0.15,
-        'chinhphu.vn': 0.12,
-        'gov.vn': 0.1,
-        'vnexpress': 0.05,
-        'baomoi': 0.03
-    }
-    
-    for domain, score in source_scores.items():
-        if domain in url.lower():
-            confidence += score
-            break
-    
-    # 4. Content quality (15%)
-    if len(content) > 200:
-        confidence += 0.15
-    elif len(content) > 100:
-        confidence += 0.08
-    
-    # 5. Title relevance (10%)
-    if any(word in title.lower() for word in query_lower.split()):
-        confidence += 0.1
-    
-    return min(confidence, 1.0)
-
-def determine_source(url):
-    """Xác định nguồn từ URL"""
-    if 'thuvienphapluat' in url.lower():
-        return 'Thư viện Pháp luật VN'
-    elif 'monre.gov.vn' in url.lower():
-        return 'Bộ TN&MT'
-    elif 'gov.vn' in url.lower():
-        return 'Cơ quan Nhà nước'
-    elif 'vnexpress' in url.lower():
-        return 'VnExpress'
-    elif 'baomoi' in url.lower():
-        return 'Báo Mới'
-    else:
-        return 'Tìm kiếm web'
-
-def is_priority_source(url):
-    """Kiểm tra có phải priority source không"""
-    priority_domains = ['thuvienphapluat', 'monre.gov.vn', 'moj.gov.vn', 'chinhphu.vn']
-    return any(domain in url.lower() for domain in priority_domains)
-
-def backup_search_strategy(query):
-    """Backup search strategy nếu main search fail"""
-    results = []
-    
-    try:
-        st.info("🔄 **Trying backup: Basic Vietnamese search**")
-        
-        # Very simple Vietnamese queries
-        simple_queries = [
-            f'"{query}" việt nam',
-            f'luật việt nam {query}',
-            f'{query} quy định'
-        ]
-        
-        for simple_query in simple_queries:
-            try:
-                params = {
-                    'q': simple_query,
-                    'format': 'json',
-                    'no_html': '1'
-                }
-                
-                response = requests.get("https://api.duckduckgo.com/", 
-                                      params=params, timeout=8)
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    
-                    # Very relaxed processing
-                    if data.get('Abstract') and 'việt nam' in data.get('Abstract', '').lower():
-                        results.append({
-                            'title': data.get('AbstractText', 'Thông tin tham khảo'),
-                            'content': data.get('Abstract'),
-                            'url': data.get('AbstractURL', ''),
-                            'source': 'Tìm kiếm web',
-                            'priority': False,
-                            'confidence': 0.4,  # Lower confidence for backup
-                            'document_type': 'Thông tin tham khảo',
-                            'method': 'backup_search'
-                        })
-                        
-                        st.info(f"✅ **Backup found result**")
-                        break
-                
-                time.sleep(1)
-                
-            except Exception as e:
-                continue
-    
-    except Exception as e:
-        st.error(f"❌ Backup search failed: {e}")
-    
-    return results
-
-# Test function to debug search step by step
-def test_search_step_by_step(query):
-    """Test search với từng bước debug"""
-    
-    st.markdown("### 🧪 **Step-by-Step Search Test**")
-    
-    # Test 1: Basic connectivity
-    st.write("**Step 1: Testing basic connectivity**")
-    try:
-        response = requests.get("https://api.duckduckgo.com/", timeout=5)
-        st.success(f"✅ Basic connectivity OK (Status: {response.status_code})")
-    except Exception as e:
-        st.error(f"❌ Connectivity failed: {e}")
-        return []
-    
-    # Test 2: Simple query
-    st.write("**Step 2: Testing simple query**")
-    try:
-        params = {'q': 'vietnam law', 'format': 'json'}
-        response = requests.get("https://api.duckduckgo.com/", params=params, timeout=10)
-        data = response.json()
-        
-        has_abstract = bool(data.get('Abstract'))
-        related_count = len(data.get('RelatedTopics', []))
-        
-        st.write(f"Simple query results: Abstract={has_abstract}, Related={related_count}")
-        
-        if has_abstract or related_count > 0:
-            st.success("✅ Simple query works")
+                st.sidebar.error(f"❌ VBPL system initialization failed: {e}")
+                st.session_state.vbpl_system = {'available': False}
         else:
-            st.warning("⚠️ Simple query returns empty")
+            st.session_state.vbpl_system = {'available': False}
+
+def is_vbpl_available() -> bool:
+    """Check if VBPL system is available"""
+    return st.session_state.get('vbpl_system', {}).get('available', False)
+
+def process_with_vbpl(query: str) -> Dict[str, Any]:
+    """Process query với VBPL system"""
+    if not is_vbpl_available():
+        return {'method': 'vbpl_unavailable', 'success': False}
+    
+    processor = st.session_state.vbpl_system['openai_processor']
+    return processor.process_legal_query(query)
+
+def show_vbpl_results_details(result: Dict[str, Any]):
+    """Show detailed VBPL results"""
+    if not result.get('sources'):
+        return
+    
+    st.markdown("### 📊 **Chi tiết kết quả từ Database VBPL**")
+    
+    # Summary metrics
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Tổng kết quả", result['total_sources'])
+    with col2:
+        st.metric("Còn hiệu lực", result['active_sources'])
+    with col3:
+        st.metric("Hết hiệu lực", result['inactive_sources'])
+    
+    # Detailed results
+    for i, source in enumerate(result['sources'], 1):
+        with st.expander(
+            f"{i}. {'✅' if source['is_active'] else '⚠️'} {source['element_number']}: {source['element_name'][:60]}...", 
+            expanded=False
+        ):
             
-    except Exception as e:
-        st.error(f"❌ Simple query failed: {e}")
-    
-    # Test 3: Vietnamese query
-    st.write("**Step 3: Testing Vietnamese query**")
-    try:
-        params = {'q': f'"{query}" việt nam', 'format': 'json'}
-        response = requests.get("https://api.duckduckgo.com/", params=params, timeout=10)
-        data = response.json()
-        
-        has_abstract = bool(data.get('Abstract'))
-        related_count = len(data.get('RelatedTopics', []))
-        
-        st.write(f"Vietnamese query results: Abstract={has_abstract}, Related={related_count}")
-        
-        if has_abstract:
-            st.code(data['Abstract'][:200] + "...")
-        
-    except Exception as e:
-        st.error(f"❌ Vietnamese query failed: {e}")
-    
-    # Test 4: Run our improved function
-    st.write("**Step 4: Testing our improved search function**")
-    try:
-        results = advanced_web_search_improved_v2(query, max_results=3)
-        st.success(f"✅ Improved search returned {len(results)} results")
-        return results
-    except Exception as e:
-        st.error(f"❌ Improved search failed: {e}")
-        return []
-
-def advanced_web_search_improved(query, max_results=5):
-    """Improved web search với better accuracy"""
-    results = []
-    
-    try:
-        # Search strategy 1: Direct thuvienphapluat.vn focus
-        search_queries = [
-            f'site:thuvienphapluat.vn "{query}" luật khoáng sản',
-            f'site:thuvienphapluat.vn khoáng sản "{query}"',
-            f'site:monre.gov.vn "{query}" khoáng sản',
-            f'"luật khoáng sản" "{query}" site:thuvienphapluat.vn'
-        ]
-        
-        for search_query in search_queries:
-            if len(results) >= max_results:
-                break
-                
-            try:
-                params = {
-                    'q': search_query,
-                    'format': 'json',
-                    'no_html': '1',
-                    'skip_disambig': '1'
-                }
-                
-                response = requests.get("https://api.duckduckgo.com/", 
-                                      params=params, timeout=8)
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    
-                    # Process Abstract với validation
-                    if data.get('Abstract') and len(data['Abstract']) > 50:
-                        title = data.get('AbstractText', 'Thông tin pháp luật')
-                        content = data.get('Abstract')
-                        url = data.get('AbstractURL', '')
-                        
-                        if is_high_quality_legal_content(title, content, url):
-                            confidence = calculate_improved_confidence(query, title, content, url)
-                            
-                            results.append({
-                                'title': title,
-                                'content': content,
-                                'url': url,
-                                'source': 'Thư viện Pháp luật' if 'thuvienphapluat' in url else 'Cơ quan nhà nước',
-                                'priority': True,
-                                'confidence': confidence,
-                                'document_type': extract_document_type(title)
-                            })
-                    
-                    # Process RelatedTopics với strict filtering
-                    for topic in data.get('RelatedTopics', []):
-                        if len(results) >= max_results:
-                            break
-                            
-                        if isinstance(topic, dict) and topic.get('Text'):
-                            title = topic.get('Text', '')[:100]
-                            content = topic.get('Text', '')
-                            url = topic.get('FirstURL', '')
-                            
-                            if (is_high_quality_legal_content(title, content, url) and
-                                len(content) > 100):
-                                
-                                confidence = calculate_improved_confidence(query, title, content, url)
-                                
-                                results.append({
-                                    'title': title + '...',
-                                    'content': content,
-                                    'url': url,
-                                    'source': 'Thư viện Pháp luật' if 'thuvienphapluat' in url else 'Tìm kiếm web',
-                                    'priority': 'thuvienphapluat' in url,
-                                    'confidence': confidence,
-                                    'document_type': extract_document_type(title)
-                                })
-                
-                time.sleep(0.5)  # Rate limiting
-                
-            except Exception as e:
-                continue
-    
-    except Exception as e:
-        st.warning(f"⚠️ Tìm kiếm web gặp lỗi: {e}")
-    
-    # Remove duplicates và sort by confidence
-    unique_results = remove_duplicate_results(results)
-    
-    # Sort by priority and confidence
-    unique_results.sort(
-        key=lambda x: (x.get('priority', False), x.get('confidence', 0)), 
-        reverse=True
-    )
-    
-    return unique_results[:max_results]
-
-def create_search_summary(search_results):
-    """Tạo summary ngắn gọn về search results"""
-    summary = ""
-    for i, result in enumerate(search_results[:3], 1):
-        confidence = result.get('confidence', 0)
-        summary += f"{i}. {result['title'][:50]}... (Confidence: {confidence:.2f})\n"
-    return summary
-
-def create_safe_enhanced_search_prompt(user_message, search_results):
-    """Tạo prompt an toàn ngăn AI hallucination"""
-    
-    if not search_results:
-        return f"""
-{user_message}
-
-QUAN TRỌNG: KHÔNG tìm thấy thông tin chính xác từ các nguồn pháp luật chính thống.
-
-HƯỚNG DẪN TRẢ LỜI:
-1. TUYỆT ĐỐI KHÔNG được bịa đặt số luật, số điều, số khoản
-2. TUYỆT ĐỐI KHÔNG được trích dẫn cụ thể nếu không có trong kết quả search
-3. CHỈ được nói về các nguyên tắc chung và khuyến nghị tham khảo nguồn chính thống
-
-Hãy trả lời: "Tôi không tìm thấy thông tin chính xác về vấn đề này từ các nguồn pháp luật chính thống. Để có thông tin chính xác nhất về [vấn đề cụ thể], bạn vui lòng:
-
-1. Tham khảo trực tiếp tại thuvienphapluat.vn
-2. Liên hệ Sở Tài nguyên và Môi trường địa phương  
-3. Tham khảo văn bản Luật Khoáng sản hiện hành và các nghị định hướng dẫn
-
-Tôi không thể đưa ra thông tin cụ thể về điều khoản pháp luật mà không có nguồn xác thực."
-"""
-    
-    # Kiểm tra chất lượng search results
-    high_quality_results = [r for r in search_results if r.get('confidence', 0) > 0.8]
-    trusted_results = [r for r in search_results if r.get('priority', False)]
-    
-    if not high_quality_results and not trusted_results:
-        return f"""
-{user_message}
-
-CẢNH BÁO: Kết quả tìm kiếm có độ tin cậy thấp.
-
-HƯỚNG DẪN TRẢ LỜI AN TOÀN:
-1. KHÔNG được trích dẫn cụ thể số luật, số điều nếu không chắc chắn 100%
-2. CHỈ được nói về các nguyên tắc chung
-3. PHẢI khuyến nghị kiểm tra tại nguồn chính thống
-
-Kết quả tìm kiếm (ĐỘ TIN CẬY THẤP):
-{create_search_summary(search_results)}
-
-Hãy trả lời thận trọng và luôn disclaimer về độ tin cậy thấp.
-"""
-    
-    # Chỉ dùng results có confidence cao
-    validated_results = [r for r in search_results if r.get('confidence', 0) > 0.7]
-    
-    search_info = "\n\n=== THÔNG TIN PHÁP LUẬT ĐÃ KIỂM ĐỊNH ===\n"
-    
-    for i, result in enumerate(validated_results, 1):
-        confidence = result.get('confidence', 0)
-        doc_type = result.get('document_type', 'Văn bản')
-        
-        search_info += f"\nNguồn {i} - {doc_type} [Tin cậy: {confidence:.2f}]:\n"
-        search_info += f"Tiêu đề: {result['title']}\n"
-        search_info += f"Nội dung: {result['content'][:800]}\n"
-        search_info += f"URL: {result.get('url', '')}\n"
-        search_info += "---\n"
-    
-    search_info += f"""
-HƯỚNG DẪN TRẢ LỜI NGHIÊM NGẶT:
-1. CHỈ được trích dẫn thông tin CÓ TRONG kết quả tìm kiếm trên
-2. TUYỆT ĐỐI KHÔNG được bịa đặt số điều, số khoản, tên luật
-3. Nếu thông tin không đầy đủ, phải ghi rõ "Thông tin không đầy đủ, cần tham khảo thêm"
-4. PHẢI có disclaimer: "Thông tin tham khảo, vui lòng kiểm tra tại thuvienphapluat.vn"
-5. Nếu có doubt gì, ưu tiên nói "Không thể xác định chính xác"
-
-=== KẾT THÚC THÔNG TIN ===
-
-Câu hỏi: {user_message}
-"""
-    
-    return search_info
+            col1, col2 = st.columns([3, 1])
+            
+            with col1:
+                st.write(f"**📄 Văn bản**: {source['document_number']}")
+                st.write(f"**📋 Tên văn bản**: {source['document_name']}")
+                st.write(f"**⚖️ Trạng thái**: {source['document_state']}")
+                st.write(f"**📍 Điều khoản**: {source['element_number']}")
+                if source['element_name']:
+                    st.write(f"**🏷️ Tên điều khoản**: {source['element_name']}")
+            
+            with col2:
+                st.metric("Relevance Score", f"{source['relevance_score']:.2f}")
+                st.metric("Element Type", source['element_type'])
+                st.metric("Priority", "High" if source['is_active'] else "Low")
+            
+            st.markdown("**📝 Nội dung đầy đủ:**")
+            st.write(source['element_content'])
 
 # =================== MAIN APPLICATION ===================
 
 def main():
+    # Initialize systems
     init_session_state()
+    init_vbpl_system()
     
     # CSS
     st.markdown("""
@@ -922,14 +748,6 @@ def main():
         font-weight: bold; 
         color: #1976D2;
     }
-    
-    .stats-box {
-        background: #f5f5f5;
-        padding: 10px;
-        border-radius: 8px;
-        border: 1px solid #ddd;
-        margin: 5px 0;
-    }
     </style>
     """, unsafe_allow_html=True)
     
@@ -937,8 +755,8 @@ def main():
     st.markdown("""
     <div style="text-align: center; padding: 20px; background: linear-gradient(90deg, #2E7D32, #4CAF50); border-radius: 10px; margin-bottom: 20px;">
         <h1 style="color: white; margin: 0;">⚖️ Trợ lý Pháp chế Khoáng sản</h1>
-        <p style="color: #E8F5E8; margin: 5px 0 0 0;">Chuyên gia tư vấn Quản lý Nhà nước về Khoáng sản tại Việt Nam</p>
-        <p style="color: #E8F5E8; margin: 5px 0 0 0; font-size: 12px;">🛡️ Safe Mode • Debug Enabled • Anti-Hallucination</p>
+        <p style="color: #E8F5E8; margin: 5px 0 0 0;">Hỗ trợ bởi Cơ sở dữ liệu Pháp luật VBPL</p>
+        <p style="color: #E8F5E8; margin: 5px 0 0 0; font-size: 12px;">🗄️ Database-Powered • Accurate Legal Content • Real-time Search</p>
     </div>
     """, unsafe_allow_html=True)
     
@@ -946,11 +764,15 @@ def main():
     with st.sidebar:
         st.markdown("### ⚙️ Cài đặt hệ thống")
         
-        # Web search toggle
-        web_search_enabled = st.toggle("🔍 Tìm kiếm pháp luật online (Debug Mode)", value=True)
-        
-        # Debug mode toggle
-        debug_mode = st.toggle("🐛 Debug Mode (Hiển thị search details)", value=True)
+        # VBPL status
+        if is_vbpl_available():
+            vbpl_enabled = st.toggle("🗄️ Sử dụng VBPL Database", value=True)
+            st.success("✅ VBPL Database Online")
+        else:
+            vbpl_enabled = False
+            st.toggle("🗄️ Sử dụng VBPL Database", value=False, disabled=True)
+            st.error("❌ VBPL Database Offline")
+            st.info("💡 Cần file vbpl.db để sử dụng")
         
         # Model selection
         model_options = ["gpt-4o-mini", "gpt-3.5-turbo", "gpt-4", "gpt-4-turbo-preview"]
@@ -968,75 +790,68 @@ def main():
         st.caption(model_info[selected_model])
         
         # Temperature
-        temperature = st.slider("🌡️ Độ sáng tạo:", 0.0, 1.0, 0.3, 0.1)
+        temperature = st.slider("🌡️ Độ sáng tạo:", 0.0, 1.0, 0.1, 0.1)
         
         st.markdown("---")
         
-        # Stats
+        # Statistics
         st.markdown("### 📊 Thống kê sử dụng")
-        
         try:
-            stats = safe_get_stats()
+            stats = st.session_state.token_stats
+            total_tokens = stats["total_input_tokens"] + stats["total_output_tokens"]
             
-            st.markdown('<div class="stats-box">', unsafe_allow_html=True)
-            st.metric("🎯 Tổng Token", f"{stats['total_tokens']:,}")
+            st.metric("🎯 Tổng Token", f"{total_tokens:,}")
+            
             col1, col2 = st.columns(2)
             with col1:
-                st.metric("📥 Input", f"{stats['input_tokens']:,}")
+                st.metric("📥 Input", f"{stats['total_input_tokens']:,}")
             with col2:
-                st.metric("📤 Output", f"{stats['output_tokens']:,}")
-            st.markdown('</div>', unsafe_allow_html=True)
+                st.metric("📤 Output", f"{stats['total_output_tokens']:,}")
             
-            st.markdown('<div class="stats-box">', unsafe_allow_html=True)
-            st.metric("💰 Chi phí (USD)", f"${stats['total_cost_usd']:.4f}")
-            st.metric("💸 Chi phí (VND)", f"{stats['total_cost_vnd']:,.0f}đ")
-            st.markdown('</div>', unsafe_allow_html=True)
-            
-            st.markdown('<div class="stats-box">', unsafe_allow_html=True)
-            st.metric("📞 Số lượt hỏi", stats['requests'])
-            duration = str(stats['session_duration']).split('.')[0]
-            st.metric("⏱️ Thời gian", duration)
-            st.markdown('</div>', unsafe_allow_html=True)
+            st.metric("💰 Chi phí (USD)", f"${stats['total_cost']:.4f}")
+            st.metric("💸 Chi phí (VND)", f"{stats['total_cost'] * 24000:,.0f}đ")
+            st.metric("📞 Số lượt hỏi", stats['request_count'])
             
         except Exception as e:
-            st.error(f"Lỗi hiển thị stats: {e}")
+            st.error(f"Error displaying stats: {e}")
         
-        # Buttons
+        # Reset buttons
         col1, col2 = st.columns(2)
         with col1:
             if st.button("🔄 Reset stats", use_container_width=True):
-                try:
-                    st.session_state.token_stats = {
-                        "total_input_tokens": 0,
-                        "total_output_tokens": 0,
-                        "total_cost": 0.0,
-                        "session_start": datetime.now(),
-                        "request_count": 0
-                    }
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Lỗi reset: {e}")
+                st.session_state.token_stats = {
+                    "total_input_tokens": 0,
+                    "total_output_tokens": 0,
+                    "total_cost": 0.0,
+                    "session_start": datetime.now(),
+                    "request_count": 0
+                }
+                st.rerun()
         
         with col2:
             if st.button("🗑️ Xóa chat", use_container_width=True):
-                try:
-                    st.session_state.messages = [
-                        {"role": "system", "content": get_strict_system_prompt()},
-                        {"role": "assistant", "content": get_welcome_message()}
-                    ]
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Lỗi xóa chat: {e}")
+                st.session_state.messages = [
+                    {"role": "system", "content": get_system_prompt()},
+                    {"role": "assistant", "content": get_welcome_message()}
+                ]
+                st.rerun()
         
         st.markdown("---")
-        st.markdown("### 🛡️ Safe Mode Features")
-        st.success("✅ Anti-hallucination prompts")
-        st.success("✅ Source verification")
-        st.success("✅ Confidence scoring")
-        st.success("✅ Debug search results")
-        st.info("💡 Ngăn AI bịa đặt thông tin pháp luật")
+        st.markdown("### 🗄️ VBPL Features")
+        if is_vbpl_available():
+            st.success("✅ Structured legal database")
+            st.success("✅ Domain-specific filtering")
+            st.success("✅ Document status prioritization")
+            st.success("✅ Professional AI prompting")
+            st.info("💡 Tìm kiếm chính xác trong database pháp luật")
+        else:
+            st.info("💡 VBPL database cung cấp:")
+            st.write("• Tìm kiếm structured content")
+            st.write("• Ưu tiên văn bản còn hiệu lực")
+            st.write("• Trích dẫn chính xác điều khoản")
+            st.write("• Filtering domain khoáng sản")
     
-    # Check API key
+    # Check OpenAI API
     if not st.secrets.get("OPENAI_API_KEY"):
         st.error("❌ Chưa cấu hình OPENAI_API_KEY trong secrets!")
         st.stop()
@@ -1057,25 +872,24 @@ def main():
             st.markdown(f'<div class="user-message">{message["content"]}</div>', 
                        unsafe_allow_html=True)
     
-    
-# Thay thế phần xử lý chat input trong main() từ dòng "if prompt := st.chat_input"
-
     # Chat input
     if prompt := st.chat_input("Nhập câu hỏi về pháp luật khoáng sản..."):
         
-        # ALWAYS SHOW DEBUG INFO - KHÔNG CẦN TOGGLE
-        st.markdown("## 🐛 **FORCED DEBUG MODE**")
-        st.info(f"📝 **User Input:** {prompt}")
-        
         # Check if mineral related
-        mineral_check = is_mineral_related(prompt)
-        st.info(f"🎯 **Is Mineral Related:** {mineral_check}")
-        
-        if not mineral_check:
+        if not is_mineral_related(prompt):
             st.session_state.messages.append({"role": "user", "content": prompt})
             st.markdown(f'<div class="user-message">{prompt}</div>', unsafe_allow_html=True)
             
-            polite_refusal = """Xin lỗi, tôi là trợ lý chuyên về **pháp luật khoáng sản** tại Việt Nam."""
+            polite_refusal = """Xin lỗi, tôi là trợ lý chuyên về **pháp luật khoáng sản** tại Việt Nam.
+
+Tôi chỉ có thể tư vấn về các vấn đề liên quan đến:
+- 🏔️ Luật Khoáng sản và các văn bản hướng dẫn
+- ⚖️ Thủ tục cấp phép thăm dò, khai thác khoáng sản
+- 💰 Thuế, phí liên quan đến khoáng sản
+- 🌱 Bảo vệ môi trường trong hoạt động khoáng sản
+- ⚠️ Xử phạt vi phạm hành chính
+
+Hãy đặt câu hỏi về lĩnh vực khoáng sản để tôi có thể hỗ trợ bạn tốt nhất! 😊"""
             
             st.session_state.messages.append({"role": "assistant", "content": polite_refusal})
             st.markdown(f'<div class="assistant-message">{polite_refusal}</div>', 
@@ -1086,209 +900,52 @@ def main():
         st.session_state.messages.append({"role": "user", "content": prompt})
         st.markdown(f'<div class="user-message">{prompt}</div>', unsafe_allow_html=True)
         
-        # Check search conditions
-        web_search_check = should_search_web(prompt)
-        st.info(f"🔎 **Should Search Web:** {web_search_check}")
-        st.info(f"🔍 **Web Search Enabled (from toggle):** {web_search_enabled}")
-        
-        search_will_run = web_search_enabled and web_search_check
-        st.info(f"⚡ **Search Will Run:** {search_will_run}")
-        
-        # Process response với FORCED DEBUG
-        st.markdown("---")
-        st.markdown("### 🔄 **Processing Response...**")
-        
-        search_results = []
-        final_prompt = prompt
-        
-        if search_will_run:
-            st.success("✅ **SEARCH CONDITIONS MET - Starting search...**")
-            
-            # Manual search test
-            st.markdown("### 🧪 **Manual Search Test**")
-            
-            try:
-                # Test basic DuckDuckGo API call
-                st.write("⏳ Testing basic DuckDuckGo API...")
+        # Process with VBPL if available
+        if vbpl_enabled and is_vbpl_available():
+            with st.spinner("🤔 Đang phân tích câu hỏi với VBPL database..."):
                 
-                test_params = {
-                    'q': f'site:thuvienphapluat.vn {prompt}',
-                    'format': 'json',
-                    'no_html': '1'
-                }
+                vbpl_result = process_with_vbpl(prompt)
                 
-                test_response = requests.get("https://api.duckduckgo.com/", 
-                                           params=test_params, timeout=10)
-                
-                st.success(f"✅ DuckDuckGo API Response: {test_response.status_code}")
-                
-                if test_response.status_code == 200:
-                    test_data = test_response.json()
+                if vbpl_result.get('success'):
+                    # Successful VBPL response
+                    response = vbpl_result['response']
                     
-                    st.write("📊 **API Response Keys:**")
-                    st.json(list(test_data.keys()))
+                    # Display response
+                    st.markdown(f'<div class="assistant-message">{response}</div>', 
+                               unsafe_allow_html=True)
                     
-                    # Show Abstract if exists
-                    if test_data.get('Abstract'):
-                        st.write("📄 **Abstract Found:**")
-                        st.code(test_data['Abstract'][:300] + "...")
-                    else:
-                        st.warning("⚠️ No Abstract in response")
+                    # Show detailed results
+                    if vbpl_result.get('sources'):
+                        show_vbpl_results_details(vbpl_result)
                     
-                    # Show RelatedTopics count
-                    related_count = len(test_data.get('RelatedTopics', []))
-                    st.write(f"🔗 **Related Topics Count:** {related_count}")
-                    
-                    if related_count > 0:
-                        st.write("📝 **First Related Topic:**")
-                        first_topic = test_data['RelatedTopics'][0]
-                        st.json(first_topic)
+                    # Update token stats (estimate)
+                    input_tokens = count_tokens(prompt)
+                    output_tokens = count_tokens(response)
+                    update_stats(input_tokens, output_tokens, selected_model)
                     
                 else:
-                    st.error(f"❌ API Error: {test_response.status_code}")
-                    
-            except Exception as e:
-                st.error(f"❌ API Test Failed: {str(e)}")
-                import traceback
-                st.code(traceback.format_exc())
-            
-            # Now try our actual search function
-            st.markdown("### 🔍 **Our Search Function Test**")
-            
-            try:
-                st.write("⏳ Calling advanced_web_search_improved...")
-                search_results = advanced_web_search_improved_v2(prompt)
-                st.success(f"✅ Search function completed. Results: {len(search_results)}")
-                
-                if search_results:
-                    st.markdown("### 📋 **SEARCH RESULTS FOUND:**")
-                    
-                    for i, result in enumerate(search_results, 1):
-                        st.markdown(f"#### Result {i}:")
-                        st.json({
-                            "title": result.get('title', ''),
-                            "content": result.get('content', '')[:200] + "...",
-                            "url": result.get('url', ''),
-                            "confidence": result.get('confidence', 0),
-                            "priority": result.get('priority', False),
-                            "source": result.get('source', '')
-                        })
-                        st.markdown("---")
-                    
-                    # Create final prompt
-                    final_prompt = create_safe_enhanced_search_prompt(prompt, search_results)
-                    
-                    st.markdown("### 🤖 **Final Prompt (First 500 chars):**")
-                    st.code(final_prompt[:500] + "...")
-                    
-                else:
-                    st.error("❌ Search function returned 0 results")
-                    
-                    # Debug why no results
-                    st.markdown("### 🔍 **Debug: Why No Results?**")
-                    
-                    # Test individual components
-                    st.write("Testing search query construction...")
-                    
-                    test_queries = [
-                        f'site:thuvienphapluat.vn "{prompt}" luật khoáng sản',
-                        f'site:thuvienphapluat.vn khoáng sản "{prompt}"',
-                        f'site:monre.gov.vn "{prompt}" khoáng sản'
-                    ]
-                    
-                    for i, query in enumerate(test_queries, 1):
-                        st.code(f"Query {i}: {query}")
-                    
-                    # Safe fallback prompt
-                    final_prompt = f"""
-{prompt}
-
-CRITICAL: Search function returned no results.
-Hãy trả lời: "Tôi không tìm thấy thông tin chính xác về vấn đề này từ các nguồn pháp luật chính thống. Để có thông tin chính xác nhất, bạn vui lòng tham khảo trực tiếp tại thuvienphapluat.vn"
-"""
-                    
-            except Exception as e:
-                st.error(f"❌ Search function failed: {str(e)}")
-                import traceback
-                st.code(traceback.format_exc())
-                
-                # Emergency fallback
-                final_prompt = f"""
-{prompt}
-
-CRITICAL: Search function crashed.
-Hãy trả lời: "Tôi gặp lỗi kỹ thuật khi tìm kiếm thông tin. Vui lòng tham khảo trực tiếp tại thuvienphapluat.vn"
-"""
+                    # VBPL failed, show fallback response
+                    response = vbpl_result['response']
+                    st.markdown(f'<div class="assistant-message">{response}</div>', 
+                               unsafe_allow_html=True)
         
         else:
-            st.warning("⚠️ **SEARCH NOT TRIGGERED**")
-            st.write("Possible reasons:")
-            st.write("- Web search toggle is OFF")
-            st.write("- Query doesn't match search indicators")
-            st.write("- Not mineral related")
-            
-            # No search fallback prompt
-            final_prompt = f"""
-{prompt}
+            # Fallback when VBPL not available
+            fallback_response = """🗄️ **Cơ sở dữ liệu VBPL không khả dụng**
 
-QUAN TRỌNG: Không có tìm kiếm web được thực hiện.
-HƯỚNG DẪN: Chỉ được nói về nguyên tắc chung và khuyến nghị tham khảo nguồn chính thống.
-"""
-        
-        # Show final prompt to be sent to AI
-        st.markdown("### 📨 **Final Prompt to AI:**")
-        with st.expander("Click to view full prompt", expanded=False):
-            st.code(final_prompt)
-        
-        # Generate AI response (keeping original logic)
-        messages_for_api = [
-            msg for msg in st.session_state.messages[:-1] 
-            if msg["role"] != "system" or msg == st.session_state.messages[0]
-        ]
-        messages_for_api.append({"role": "user", "content": final_prompt})
-        
-        input_text = "\n".join([msg["content"] for msg in messages_for_api])
-        input_tokens = count_tokens(input_text)
-        
-        # Generate response
-        try:
-            response = ""
+Để có thông tin chính xác nhất về vấn đề này, bạn vui lòng:
+
+1. **Tham khảo trực tiếp** tại thuvienphapluat.vn
+2. **Liên hệ** Sở Tài nguyên và Môi trường địa phương
+3. **Tham khảo** Luật Khoáng sản hiện hành và các nghị định hướng dẫn
+
+💡 **Gợi ý**: Để sử dụng tính năng tìm kiếm database chính xác, vui lòng cung cấp file `vbpl.db`."""
             
-            stream = client.chat.completions.create(
-                model=selected_model,
-                messages=messages_for_api,
-                stream=True,
-                temperature=temperature,
-                max_tokens=2000
-            )
-            
-            response_container = st.empty()
-            
-            for chunk in stream:
-                if chunk.choices and chunk.choices[0].delta.content:
-                    response += chunk.choices[0].delta.content
-                    response_container.markdown(
-                        f'<div class="assistant-message">{response}▌</div>', 
-                        unsafe_allow_html=True
-                    )
-            
-            # Final response
-            response_container.markdown(
-                f'<div class="assistant-message">{response}</div>', 
-                unsafe_allow_html=True
-            )
-            
-            # Update stats
-            output_tokens = count_tokens(response)
-            update_stats(input_tokens, output_tokens, selected_model)
-            
-        except Exception as e:
-            error_msg = f"❌ Lỗi AI response: {str(e)}"
-            st.markdown(f'<div class="assistant-message">{error_msg}</div>', 
+            st.markdown(f'<div class="assistant-message">{fallback_response}</div>', 
                        unsafe_allow_html=True)
-            response = error_msg
         
         # Add response to history
         st.session_state.messages.append({"role": "assistant", "content": response})
+
 if __name__ == "__main__":
     main()
