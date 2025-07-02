@@ -372,6 +372,343 @@ def calculate_string_similarity(str1, str2):
     union = len(words1.union(words2))
     
     return intersection / union if union > 0 else 0.0
+# Thay thế hàm advanced_web_search_improved() trong streamlit_app.py
+
+def advanced_web_search_improved_v2(query, max_results=5):
+    """Fixed web search - không dùng site restriction"""
+    results = []
+    
+    try:
+        # Strategy 1: General Vietnamese legal queries (NO site: restriction)
+        search_queries = [
+            f'"{query}" luật khoáng sản Việt Nam',
+            f'"{query}" nghị định khoáng sản',
+            f'luật khoáng sản "{query}" thuvienphapluat',
+            f'khoáng sản "{query}" quy định pháp luật',
+            f'"{query}" bộ tài nguyên môi trường'
+        ]
+        
+        for search_query in search_queries:
+            if len(results) >= max_results:
+                break
+                
+            try:
+                # Remove site: restrictions, use general search
+                params = {
+                    'q': search_query,
+                    'format': 'json',
+                    'no_html': '1',
+                    'skip_disambig': '1',
+                    'safe_search': 'moderate'
+                }
+                
+                response = requests.get("https://api.duckduckgo.com/", 
+                                      params=params, timeout=10)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    
+                    # Debug: Show what we got
+                    st.write(f"🔍 **Query:** {search_query}")
+                    st.write(f"📊 **Abstract:** {'✅' if data.get('Abstract') else '❌'}")
+                    st.write(f"🔗 **RelatedTopics:** {len(data.get('RelatedTopics', []))}")
+                    
+                    # Process Abstract với relaxed validation
+                    if data.get('Abstract') and len(data['Abstract']) > 30:
+                        title = data.get('AbstractText', 'Thông tin pháp luật')
+                        content = data.get('Abstract')
+                        url = data.get('AbstractURL', '')
+                        
+                        # Relaxed validation for Vietnamese content
+                        if is_vietnamese_legal_content(title, content, url):
+                            confidence = calculate_vietnamese_confidence(query, title, content, url)
+                            
+                            results.append({
+                                'title': title,
+                                'content': content,
+                                'url': url,
+                                'source': determine_source(url),
+                                'priority': is_priority_source(url),
+                                'confidence': confidence,
+                                'document_type': extract_document_type(title),
+                                'method': 'duckduckgo_abstract'
+                            })
+                            
+                            st.success(f"✅ **Found Abstract Result** (Confidence: {confidence:.2f})")
+                    
+                    # Process RelatedTopics với relaxed filtering
+                    for i, topic in enumerate(data.get('RelatedTopics', [])):
+                        if len(results) >= max_results:
+                            break
+                            
+                        if isinstance(topic, dict) and topic.get('Text'):
+                            title = topic.get('Text', '')[:100]
+                            content = topic.get('Text', '')
+                            url = topic.get('FirstURL', '')
+                            
+                            if (len(content) > 50 and 
+                                is_vietnamese_legal_content(title, content, url)):
+                                
+                                confidence = calculate_vietnamese_confidence(query, title, content, url)
+                                
+                                results.append({
+                                    'title': title + '...',
+                                    'content': content,
+                                    'url': url,
+                                    'source': determine_source(url),
+                                    'priority': is_priority_source(url),
+                                    'confidence': confidence,
+                                    'document_type': extract_document_type(title),
+                                    'method': 'duckduckgo_related'
+                                })
+                                
+                                st.success(f"✅ **Found Related Topic {i+1}** (Confidence: {confidence:.2f})")
+                
+                time.sleep(0.8)  # Longer delay to avoid rate limiting
+                
+            except Exception as e:
+                st.warning(f"⚠️ Query failed: {search_query} - Error: {e}")
+                continue
+    
+    except Exception as e:
+        st.error(f"❌ Search failed completely: {e}")
+    
+    # If still no results, try backup strategy
+    if not results:
+        st.warning("🔄 **Trying backup search strategy...**")
+        results = backup_search_strategy(query)
+    
+    # Remove duplicates và sort
+    unique_results = remove_duplicate_results(results)
+    unique_results.sort(
+        key=lambda x: (x.get('priority', False), x.get('confidence', 0)), 
+        reverse=True
+    )
+    
+    return unique_results[:max_results]
+
+def is_vietnamese_legal_content(title, content, url=""):
+    """Relaxed validation cho Vietnamese legal content"""
+    
+    text = (title + ' ' + content).lower()
+    
+    # Vietnamese legal keywords (relaxed)
+    legal_keywords = [
+        'luật', 'nghị định', 'thông tư', 'quyết định',
+        'điều', 'khoản', 'quy định', 'pháp luật',
+        'khoáng sản', 'tài nguyên', 'môi trường',
+        'việt nam', 'chính phủ', 'bộ', 'ủy ban'
+    ]
+    
+    # Must have at least 2 legal keywords
+    keyword_count = sum(1 for keyword in legal_keywords if keyword in text)
+    
+    # Vietnamese text indicators
+    vietnamese_chars = ['ă', 'â', 'đ', 'ê', 'ô', 'ơ', 'ư', 'á', 'à', 'ả', 'ã', 'ạ']
+    has_vietnamese = any(char in text for char in vietnamese_chars)
+    
+    # Length check
+    sufficient_length = len(content.strip()) > 50
+    
+    # Negative filters
+    spam_indicators = ['quảng cáo', 'bán hàng', '404', 'error', 'not found']
+    has_spam = any(spam in text for spam in spam_indicators)
+    
+    return keyword_count >= 2 and has_vietnamese and sufficient_length and not has_spam
+
+def calculate_vietnamese_confidence(query, title, content, url=""):
+    """Confidence calculation for Vietnamese content"""
+    
+    confidence = 0.2  # Lower base for general content
+    
+    query_lower = query.lower()
+    text_lower = (title + ' ' + content).lower()
+    
+    # 1. Query word presence (30%)
+    query_words = set(query_lower.split())
+    text_words = set(text_lower.split())
+    if len(query_words) > 0:
+        overlap_ratio = len(query_words.intersection(text_words)) / len(query_words)
+        confidence += overlap_ratio * 0.3
+    
+    # 2. Legal indicators (25%)
+    legal_patterns = [
+        (r'luật.*khoáng sản', 0.2),
+        (r'nghị định.*\d+', 0.15),
+        (r'thông tư.*\d+', 0.1),
+        (r'điều\s+\d+', 0.08),
+        (r'khoản\s+\d+', 0.05)
+    ]
+    
+    for pattern, weight in legal_patterns:
+        if re.search(pattern, text_lower):
+            confidence += weight
+            break
+    
+    # 3. Source bonus (20%)
+    source_scores = {
+        'thuvienphapluat': 0.2,
+        'monre.gov.vn': 0.18,
+        'moj.gov.vn': 0.15,
+        'chinhphu.vn': 0.12,
+        'gov.vn': 0.1,
+        'vnexpress': 0.05,
+        'baomoi': 0.03
+    }
+    
+    for domain, score in source_scores.items():
+        if domain in url.lower():
+            confidence += score
+            break
+    
+    # 4. Content quality (15%)
+    if len(content) > 200:
+        confidence += 0.15
+    elif len(content) > 100:
+        confidence += 0.08
+    
+    # 5. Title relevance (10%)
+    if any(word in title.lower() for word in query_lower.split()):
+        confidence += 0.1
+    
+    return min(confidence, 1.0)
+
+def determine_source(url):
+    """Xác định nguồn từ URL"""
+    if 'thuvienphapluat' in url.lower():
+        return 'Thư viện Pháp luật VN'
+    elif 'monre.gov.vn' in url.lower():
+        return 'Bộ TN&MT'
+    elif 'gov.vn' in url.lower():
+        return 'Cơ quan Nhà nước'
+    elif 'vnexpress' in url.lower():
+        return 'VnExpress'
+    elif 'baomoi' in url.lower():
+        return 'Báo Mới'
+    else:
+        return 'Tìm kiếm web'
+
+def is_priority_source(url):
+    """Kiểm tra có phải priority source không"""
+    priority_domains = ['thuvienphapluat', 'monre.gov.vn', 'moj.gov.vn', 'chinhphu.vn']
+    return any(domain in url.lower() for domain in priority_domains)
+
+def backup_search_strategy(query):
+    """Backup search strategy nếu main search fail"""
+    results = []
+    
+    try:
+        st.info("🔄 **Trying backup: Basic Vietnamese search**")
+        
+        # Very simple Vietnamese queries
+        simple_queries = [
+            f'"{query}" việt nam',
+            f'luật việt nam {query}',
+            f'{query} quy định'
+        ]
+        
+        for simple_query in simple_queries:
+            try:
+                params = {
+                    'q': simple_query,
+                    'format': 'json',
+                    'no_html': '1'
+                }
+                
+                response = requests.get("https://api.duckduckgo.com/", 
+                                      params=params, timeout=8)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    
+                    # Very relaxed processing
+                    if data.get('Abstract') and 'việt nam' in data.get('Abstract', '').lower():
+                        results.append({
+                            'title': data.get('AbstractText', 'Thông tin tham khảo'),
+                            'content': data.get('Abstract'),
+                            'url': data.get('AbstractURL', ''),
+                            'source': 'Tìm kiếm web',
+                            'priority': False,
+                            'confidence': 0.4,  # Lower confidence for backup
+                            'document_type': 'Thông tin tham khảo',
+                            'method': 'backup_search'
+                        })
+                        
+                        st.info(f"✅ **Backup found result**")
+                        break
+                
+                time.sleep(1)
+                
+            except Exception as e:
+                continue
+    
+    except Exception as e:
+        st.error(f"❌ Backup search failed: {e}")
+    
+    return results
+
+# Test function to debug search step by step
+def test_search_step_by_step(query):
+    """Test search với từng bước debug"""
+    
+    st.markdown("### 🧪 **Step-by-Step Search Test**")
+    
+    # Test 1: Basic connectivity
+    st.write("**Step 1: Testing basic connectivity**")
+    try:
+        response = requests.get("https://api.duckduckgo.com/", timeout=5)
+        st.success(f"✅ Basic connectivity OK (Status: {response.status_code})")
+    except Exception as e:
+        st.error(f"❌ Connectivity failed: {e}")
+        return []
+    
+    # Test 2: Simple query
+    st.write("**Step 2: Testing simple query**")
+    try:
+        params = {'q': 'vietnam law', 'format': 'json'}
+        response = requests.get("https://api.duckduckgo.com/", params=params, timeout=10)
+        data = response.json()
+        
+        has_abstract = bool(data.get('Abstract'))
+        related_count = len(data.get('RelatedTopics', []))
+        
+        st.write(f"Simple query results: Abstract={has_abstract}, Related={related_count}")
+        
+        if has_abstract or related_count > 0:
+            st.success("✅ Simple query works")
+        else:
+            st.warning("⚠️ Simple query returns empty")
+            
+    except Exception as e:
+        st.error(f"❌ Simple query failed: {e}")
+    
+    # Test 3: Vietnamese query
+    st.write("**Step 3: Testing Vietnamese query**")
+    try:
+        params = {'q': f'"{query}" việt nam', 'format': 'json'}
+        response = requests.get("https://api.duckduckgo.com/", params=params, timeout=10)
+        data = response.json()
+        
+        has_abstract = bool(data.get('Abstract'))
+        related_count = len(data.get('RelatedTopics', []))
+        
+        st.write(f"Vietnamese query results: Abstract={has_abstract}, Related={related_count}")
+        
+        if has_abstract:
+            st.code(data['Abstract'][:200] + "...")
+        
+    except Exception as e:
+        st.error(f"❌ Vietnamese query failed: {e}")
+    
+    # Test 4: Run our improved function
+    st.write("**Step 4: Testing our improved search function**")
+    try:
+        results = advanced_web_search_improved_v2(query, max_results=3)
+        st.success(f"✅ Improved search returned {len(results)} results")
+        return results
+    except Exception as e:
+        st.error(f"❌ Improved search failed: {e}")
+        return []
 
 def advanced_web_search_improved(query, max_results=5):
     """Improved web search với better accuracy"""
@@ -820,7 +1157,7 @@ def main():
             
             try:
                 st.write("⏳ Calling advanced_web_search_improved...")
-                search_results = advanced_web_search_improved(prompt)
+                search_results = advanced_web_search_improved_v2(prompt)
                 st.success(f"✅ Search function completed. Results: {len(search_results)}")
                 
                 if search_results:
