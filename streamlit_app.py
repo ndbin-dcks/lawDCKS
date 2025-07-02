@@ -7,6 +7,7 @@ import re
 from urllib.parse import quote
 import time
 import os
+import traceback
 
 # Cấu hình trang
 st.set_page_config(
@@ -37,7 +38,7 @@ def init_session_state():
     
     if "messages" not in st.session_state:
         st.session_state.messages = [
-            {"role": "system", "content": get_system_prompt()},
+            {"role": "system", "content": get_strict_system_prompt()},
             {"role": "assistant", "content": get_welcome_message()}
         ]
 
@@ -91,38 +92,53 @@ def count_tokens(text):
     """Ước tính số token đơn giản"""
     return len(str(text)) // 4
 
-def get_system_prompt():
-    """Lấy system prompt"""
+def get_strict_system_prompt():
+    """System prompt nghiêm ngặt ngăn hallucination"""
     try:
         with open("01.system_trainning.txt", "r", encoding="utf-8") as file:
-            return file.read()
+            base_prompt = file.read()
+            # Thêm strict instructions vào cuối
+            return base_prompt + """
+
+🚫 HƯỚNG DẪN NGHIÊM NGẶT BỔ SUNG:
+
+TUYỆT ĐỐI KHÔNG ĐƯỢC:
+1. Bịa đặt số luật, số điều, số khoản nếu không có trong thông tin tìm kiếm
+2. Trích dẫn cụ thể các điều khoản pháp luật mà không có nguồn xác thực
+3. Đưa ra thông tin chi tiết về nội dung luật nếu không chắc chắn 100%
+4. Sử dụng kiến thức cũ về pháp luật mà không có xác nhận từ nguồn hiện tại
+
+CHỈ ĐƯỢC:
+1. Trích dẫn thông tin CÓ TRONG kết quả tìm kiếm được cung cấp
+2. Đưa ra các nguyên tắc chung về pháp luật khoáng sản
+3. Hướng dẫn người hỏi tham khảo nguồn chính thống
+4. Nói rõ khi thông tin không đầy đủ hoặc cần kiểm tra thêm
+
+LUÔN ưu tiên an toàn thông tin hơn việc đưa ra câu trả lời chi tiết."""
+            
     except FileNotFoundError:
         return """Bạn là chuyên gia pháp chế về quản lý nhà nước trong lĩnh vực khoáng sản tại Việt Nam.
 
-⚖️ NGUYÊN TẮC LÀM VIỆC:
-1. CHỈ tập trung vào các vấn đề liên quan đến khoáng sản ở Việt Nam
-2. Đưa ra thông tin chính xác, dẫn chiếu cụ thể điều khoản pháp luật khi có
-3. Giải thích rõ ràng, dễ hiểu cho cả chuyên gia và người dân
-4. Khi có thông tin web, ưu tiên nguồn chính thống: thuvienphapluat.vn, monre.gov.vn
-5. Từ chối lịch sự các câu hỏi không liên quan đến khoáng sản
+⚖️ NGUYÊN TẮC LÀM VIỆC NGHIÊM NGẶT:
 
-🎯 CÁCH TRÍCH DẪN:
-- Luôn ghi rõ tên văn bản pháp luật, điều, khoản cụ thể nếu có
-- Khi có thông tin web: "Dựa theo thông tin từ [nguồn chính thống]..."
-- Khi không chắc chắn: "Thông tin tham khảo, vui lòng kiểm tra tại thuvienphapluat.vn"
+🚫 TUYỆT ĐỐI KHÔNG ĐƯỢC:
+1. Bịa đặt số luật, số điều, số khoản nếu không có trong thông tin tìm kiếm
+2. Trích dẫn cụ thể các điều khoản pháp luật mà không có nguồn xác thực
+3. Đưa ra thông tin chi tiết về nội dung luật nếu không chắc chắn 100%
+4. Sử dụng kiến thức cũ về pháp luật mà không có xác nhận từ nguồn hiện tại
 
-📋 CÁC CHỦ ĐỀ CHÍNH:
-1. Quyền khai thác khoáng sản và thủ tục cấp phép
-2. Nghĩa vụ của tổ chức, cá nhân khai thác khoáng sản  
-3. Thuế tài nguyên và các khoản thu khác
-4. Bảo vệ môi trường trong hoạt động khoáng sản
-5. Xử phạt vi phạm hành chính
-6. Thanh tra, kiểm tra hoạt động khoáng sản
+✅ CHỈ ĐƯỢC:
+1. Trích dẫn thông tin CÓ TRONG kết quả tìm kiếm được cung cấp
+2. Đưa ra các nguyên tắc chung về pháp luật khoáng sản
+3. Hướng dẫn người hỏi tham khảo nguồn chính thống
+4. Nói rõ khi thông tin không đầy đủ hoặc cần kiểm tra thêm
 
-QUAN TRỌNG: 
-- Chỉ trả lời các câu hỏi về khoáng sản
-- Nếu câu hỏi không liên quan, hãy lịch sự chuyển hướng về lĩnh vực chuyên môn
-- Luôn khuyến nghị kiểm tra thông tin tại thuvienphapluat.vn để đảm bảo tính chính xác"""
+🎯 CÁCH TRẢ LỜI AN TOÀN:
+- Khi có thông tin từ search: "Dựa theo thông tin tìm kiếm từ [nguồn]..."
+- Khi không chắc chắn: "Thông tin này cần được kiểm tra tại thuvienphapluat.vn"
+- Khi thông tin không đủ: "Tôi không có đủ thông tin chính xác để trả lời chi tiết"
+
+QUAN TRỌNG: An toàn thông tin pháp luật quan trọng hơn việc đưa ra câu trả lời chi tiết."""
 
 def get_welcome_message():
     """Lấy tin nhắn chào mừng"""
@@ -145,23 +161,8 @@ Tôi là **Trợ lý Pháp chế chuyên về Quản lý Nhà nước trong lĩn
    • Gia hạn, sửa đổi, bổ sung giấy phép
    • Thủ tục đóng cửa mỏ
 
-✅ **Thuế và các khoản thu:**
-   • Thuế tài nguyên
-   • Tiền cấp quyền khai thác khoáng sản
-   • Phí thăm dò khoáng sản
-
-✅ **Xử phạt vi phạm hành chính:**
-   • Các hành vi vi phạm và mức phạt
-   • Biện pháp khắc phục hậu quả
-   • Thẩm quyền xử phạt
-
-✅ **Bảo vệ môi trường:**
-   • Đánh giá tác động môi trường
-   • Kế hoạch bảo vệ môi trường
-   • Phục hồi môi trường sau khai thác
-
 🎯 **Lưu ý quan trọng:** 
-Tôi chỉ tư vấn về lĩnh vực **Khoáng sản**. Đối với các vấn đề khác, bạn vui lòng tham khảo chuyên gia phù hợp.
+Tôi chỉ tư vấn về lĩnh vực **Khoáng sản**. Để có thông tin chính xác nhất, bạn nên tham khảo trực tiếp tại **thuvienphapluat.vn**.
 
 **Bạn có thắc mắc gì về pháp luật Khoáng sản không?** 🤔"""
 
@@ -181,7 +182,8 @@ def is_mineral_related(message):
         'luật khoáng sản', 'giấy phép', 'cấp phép', 'thuế tài nguyên',
         'phí thăm dò', 'tiền cấp quyền', 'vi phạm hành chính',
         'bộ tài nguyên', 'sở tài nguyên', 'monre', 'tn&mt',
-        'mỏ', 'mỏ đá', 'mỏ cát', 'mỏ than', 'quarry', 'mining'
+        'mỏ', 'mỏ đá', 'mỏ cát', 'mỏ than', 'quarry', 'mining',
+        'thu hồi giấy phép'
     ]
     
     message_lower = message.lower()
@@ -192,14 +194,15 @@ def should_search_web(message):
     search_indicators = [
         'mới nhất', 'cập nhật', 'hiện hành', 'ban hành', 'sửa đổi',
         'bổ sung', 'thay thế', 'có hiệu lực', 'quy định mới',
-        'nghị định', 'thông tư', 'luật', 'pháp luật', 'điều'
+        'nghị định', 'thông tư', 'luật', 'pháp luật', 'điều',
+        'khi nào', 'trường hợp nào', 'điều kiện', 'thu hồi'
     ]
     
     message_lower = message.lower()
     return (is_mineral_related(message) and 
             any(indicator in message_lower for indicator in search_indicators))
 
-# =================== IMPROVED SEARCH FUNCTIONS ===================
+# =================== SEARCH FUNCTIONS ===================
 
 def is_high_quality_legal_content(title, content, url=""):
     """Kiểm tra nội dung có phải văn bản pháp luật chất lượng cao không"""
@@ -225,7 +228,7 @@ def is_high_quality_legal_content(title, content, url=""):
     mineral_legal_terms = [
         'luật khoáng sản', 'khai thác khoáng sản', 'thăm dò khoáng sản',
         'giấy phép khai thác', 'giấy phép thăm dò', 'thuế tài nguyên',
-        'bộ tài nguyên', 'sở tài nguyên'
+        'bộ tài nguyên', 'sở tài nguyên', 'thu hồi giấy phép'
     ]
     
     has_mineral_terms = any(term in text for term in mineral_legal_terms)
@@ -310,6 +313,65 @@ def calculate_improved_confidence(query, title, content, url=""):
         confidence *= 0.3
     
     return min(confidence, 1.0)
+
+def extract_document_type(title):
+    """Trích xuất loại văn bản từ tiêu đề"""
+    title_lower = title.lower()
+    
+    if re.search(r'luật\s+(?:số\s*)?\d+', title_lower):
+        return 'Luật'
+    elif re.search(r'nghị định\s+(?:số\s*)?\d+', title_lower):
+        return 'Nghị định'
+    elif re.search(r'thông tư\s+(?:số\s*)?\d+', title_lower):
+        return 'Thông tư'
+    elif re.search(r'quyết định\s+(?:số\s*)?\d+', title_lower):
+        return 'Quyết định'
+    else:
+        return 'Văn bản'
+
+def remove_duplicate_results(results):
+    """Loại bỏ kết quả trùng lặp"""
+    unique_results = []
+    seen_urls = set()
+    seen_titles = set()
+    
+    for result in results:
+        url = result.get('url', '')
+        title = result.get('title', '').lower().strip()
+        
+        # Skip if URL or title already seen
+        if url in seen_urls or title in seen_titles:
+            continue
+            
+        # Skip if title too similar to existing ones
+        is_duplicate = False
+        for seen_title in seen_titles:
+            if calculate_string_similarity(title, seen_title) > 0.8:
+                is_duplicate = True
+                break
+        
+        if not is_duplicate:
+            seen_urls.add(url)
+            seen_titles.add(title)
+            unique_results.append(result)
+    
+    return unique_results
+
+def calculate_string_similarity(str1, str2):
+    """Tính similarity giữa 2 string"""
+    if not str1 or not str2:
+        return 0.0
+    
+    words1 = set(str1.split())
+    words2 = set(str2.split())
+    
+    if not words1 or not words2:
+        return 0.0
+    
+    intersection = len(words1.intersection(words2))
+    union = len(words1.union(words2))
+    
+    return intersection / union if union > 0 else 0.0
 
 def advanced_web_search_improved(query, max_results=5):
     """Improved web search với better accuracy"""
@@ -405,124 +467,87 @@ def advanced_web_search_improved(query, max_results=5):
     
     return unique_results[:max_results]
 
-def extract_document_type(title):
-    """Trích xuất loại văn bản từ tiêu đề"""
-    title_lower = title.lower()
-    
-    if re.search(r'luật\s+(?:số\s*)?\d+', title_lower):
-        return 'Luật'
-    elif re.search(r'nghị định\s+(?:số\s*)?\d+', title_lower):
-        return 'Nghị định'
-    elif re.search(r'thông tư\s+(?:số\s*)?\d+', title_lower):
-        return 'Thông tư'
-    elif re.search(r'quyết định\s+(?:số\s*)?\d+', title_lower):
-        return 'Quyết định'
-    else:
-        return 'Văn bản'
+def create_search_summary(search_results):
+    """Tạo summary ngắn gọn về search results"""
+    summary = ""
+    for i, result in enumerate(search_results[:3], 1):
+        confidence = result.get('confidence', 0)
+        summary += f"{i}. {result['title'][:50]}... (Confidence: {confidence:.2f})\n"
+    return summary
 
-def remove_duplicate_results(results):
-    """Loại bỏ kết quả trùng lặp"""
-    unique_results = []
-    seen_urls = set()
-    seen_titles = set()
+def create_safe_enhanced_search_prompt(user_message, search_results):
+    """Tạo prompt an toàn ngăn AI hallucination"""
     
-    for result in results:
-        url = result.get('url', '')
-        title = result.get('title', '').lower().strip()
-        
-        # Skip if URL or title already seen
-        if url in seen_urls or title in seen_titles:
-            continue
-            
-        # Skip if title too similar to existing ones
-        is_duplicate = False
-        for seen_title in seen_titles:
-            if calculate_string_similarity(title, seen_title) > 0.8:
-                is_duplicate = True
-                break
-        
-        if not is_duplicate:
-            seen_urls.add(url)
-            seen_titles.add(title)
-            unique_results.append(result)
-    
-    return unique_results
-
-def calculate_string_similarity(str1, str2):
-    """Tính similarity giữa 2 string"""
-    if not str1 or not str2:
-        return 0.0
-    
-    words1 = set(str1.split())
-    words2 = set(str2.split())
-    
-    if not words1 or not words2:
-        return 0.0
-    
-    intersection = len(words1.intersection(words2))
-    union = len(words1.union(words2))
-    
-    return intersection / union if union > 0 else 0.0
-
-def create_enhanced_search_prompt(user_message, search_results):
-    """Tạo prompt với kết quả tìm kiếm đã được validate"""
     if not search_results:
         return f"""
 {user_message}
 
-QUAN TRỌNG: Không tìm thấy thông tin chính xác từ các nguồn pháp luật chính thống.
-Hãy trả lời dựa trên kiến thức có sẵn và LƯU Ý:
-1. Ghi rõ đây là thông tin tham khảo, chưa được xác minh từ nguồn chính thống
-2. Khuyến nghị người hỏi tham khảo trực tiếp tại thuvienphapluat.vn
-3. Nếu là điều khoản cụ thể, đề xuất tìm kiếm trực tiếp trên website chính thống
-4. Đưa ra link trực tiếp: https://thuvienphapluat.vn
+QUAN TRỌNG: KHÔNG tìm thấy thông tin chính xác từ các nguồn pháp luật chính thống.
+
+HƯỚNG DẪN TRẢ LỜI:
+1. TUYỆT ĐỐI KHÔNG được bịa đặt số luật, số điều, số khoản
+2. TUYỆT ĐỐI KHÔNG được trích dẫn cụ thể nếu không có trong kết quả search
+3. CHỈ được nói về các nguyên tắc chung và khuyến nghị tham khảo nguồn chính thống
+
+Hãy trả lời: "Tôi không tìm thấy thông tin chính xác về vấn đề này từ các nguồn pháp luật chính thống. Để có thông tin chính xác nhất về [vấn đề cụ thể], bạn vui lòng:
+
+1. Tham khảo trực tiếp tại thuvienphapluat.vn
+2. Liên hệ Sở Tài nguyên và Môi trường địa phương  
+3. Tham khảo văn bản Luật Khoáng sản hiện hành và các nghị định hướng dẫn
+
+Tôi không thể đưa ra thông tin cụ thể về điều khoản pháp luật mà không có nguồn xác thực."
 """
     
-    # Sắp xếp kết quả theo độ tin cậy và priority
-    sorted_results = sorted(search_results, 
-                          key=lambda x: (x.get('priority', False), x.get('confidence', 0)), 
-                          reverse=True)
+    # Kiểm tra chất lượng search results
+    high_quality_results = [r for r in search_results if r.get('confidence', 0) > 0.8]
+    trusted_results = [r for r in search_results if r.get('priority', False)]
     
-    search_info = "\n\n=== THÔNG TIN PHÁP LUẬT TÌM KIẾM ===\n"
-    high_confidence_found = any(r.get('confidence', 0) > 0.7 for r in sorted_results)
+    if not high_quality_results and not trusted_results:
+        return f"""
+{user_message}
+
+CẢNH BÁO: Kết quả tìm kiếm có độ tin cậy thấp.
+
+HƯỚNG DẪN TRẢ LỜI AN TOÀN:
+1. KHÔNG được trích dẫn cụ thể số luật, số điều nếu không chắc chắn 100%
+2. CHỈ được nói về các nguyên tắc chung
+3. PHẢI khuyến nghị kiểm tra tại nguồn chính thống
+
+Kết quả tìm kiếm (ĐỘ TIN CẬY THẤP):
+{create_search_summary(search_results)}
+
+Hãy trả lời thận trọng và luôn disclaimer về độ tin cậy thấp.
+"""
     
-    for i, result in enumerate(sorted_results, 1):
-        priority_mark = "⭐ " if result.get('priority') else ""
+    # Chỉ dùng results có confidence cao
+    validated_results = [r for r in search_results if r.get('confidence', 0) > 0.7]
+    
+    search_info = "\n\n=== THÔNG TIN PHÁP LUẬT ĐÃ KIỂM ĐỊNH ===\n"
+    
+    for i, result in enumerate(validated_results, 1):
         confidence = result.get('confidence', 0)
-        confidence_mark = f"[Tin cậy: {confidence:.1f}]"
         doc_type = result.get('document_type', 'Văn bản')
         
-        search_info += f"\n{priority_mark}Nguồn {i} ({result['source']}) {confidence_mark}:\n"
-        search_info += f"Loại văn bản: {doc_type}\n"
+        search_info += f"\nNguồn {i} - {doc_type} [Tin cậy: {confidence:.2f}]:\n"
         search_info += f"Tiêu đề: {result['title']}\n"
-        search_info += f"Nội dung: {result['content'][:600]}...\n"
-        
-        if result.get('url'):
-            search_info += f"URL: {result['url']}\n"
+        search_info += f"Nội dung: {result['content'][:800]}\n"
+        search_info += f"URL: {result.get('url', '')}\n"
         search_info += "---\n"
     
-    confidence_instruction = ""
-    if high_confidence_found:
-        confidence_instruction = "CÓ NGUỒN TIN CẬY CAO - Hãy ưu tiên các nguồn có độ tin cậy > 0.7 và có ⭐"
-    else:
-        confidence_instruction = "KHÔNG CÓ NGUỒN TIN CẬY CAO - Hãy thận trọng khi trích dẫn và ghi rõ cần xác minh thêm"
-    
     search_info += f"""
-{confidence_instruction}
+HƯỚNG DẪN TRẢ LỜI NGHIÊM NGẶT:
+1. CHỈ được trích dẫn thông tin CÓ TRONG kết quả tìm kiếm trên
+2. TUYỆT ĐỐI KHÔNG được bịa đặt số điều, số khoản, tên luật
+3. Nếu thông tin không đầy đủ, phải ghi rõ "Thông tin không đầy đủ, cần tham khảo thêm"
+4. PHẢI có disclaimer: "Thông tin tham khảo, vui lòng kiểm tra tại thuvienphapluat.vn"
+5. Nếu có doubt gì, ưu tiên nói "Không thể xác định chính xác"
 
-HƯỚNG DẪN TRÍCH DẪN CHÍNH XÁC:
-1. Ưu tiên tuyệt đối nguồn có ⭐ (thuvienphapluat.vn, monre.gov.vn) 
-2. Ưu tiên kết quả có độ tin cậy > 0.7
-3. PHẢI trích dẫn chính xác: "Theo [Loại văn bản] [số] về [tên], Điều X khoản Y..."
-4. Nếu độ tin cậy < 0.7: "Thông tin tham khảo từ [nguồn], cần xác minh thêm tại thuvienphapluat.vn"
-5. Luôn khuyến nghị: "Để có thông tin chính xác nhất, vui lòng tham khảo tại thuvienphapluat.vn"
-6. Không bao giờ bịa đặt số điều, khoản nếu không có trong kết quả tìm kiếm
+=== KẾT THÚC THÔNG TIN ===
 
-=== KẾT THÚC THÔNG TIN PHÁP LUẬT ===
-
+Câu hỏi: {user_message}
 """
     
-    return search_info + f"Câu hỏi: {user_message}"
+    return search_info
 
 # =================== MAIN APPLICATION ===================
 
@@ -576,7 +601,7 @@ def main():
     <div style="text-align: center; padding: 20px; background: linear-gradient(90deg, #2E7D32, #4CAF50); border-radius: 10px; margin-bottom: 20px;">
         <h1 style="color: white; margin: 0;">⚖️ Trợ lý Pháp chế Khoáng sản</h1>
         <p style="color: #E8F5E8; margin: 5px 0 0 0;">Chuyên gia tư vấn Quản lý Nhà nước về Khoáng sản tại Việt Nam</p>
-        <p style="color: #E8F5E8; margin: 5px 0 0 0; font-size: 12px;">🆕 Improved Search • High Accuracy • Real-time Legal Data</p>
+        <p style="color: #E8F5E8; margin: 5px 0 0 0; font-size: 12px;">🛡️ Safe Mode • Debug Enabled • Anti-Hallucination</p>
     </div>
     """, unsafe_allow_html=True)
     
@@ -585,7 +610,10 @@ def main():
         st.markdown("### ⚙️ Cài đặt hệ thống")
         
         # Web search toggle
-        web_search_enabled = st.toggle("🔍 Tìm kiếm pháp luật online (Improved)", value=True)
+        web_search_enabled = st.toggle("🔍 Tìm kiếm pháp luật online (Debug Mode)", value=True)
+        
+        # Debug mode toggle
+        debug_mode = st.toggle("🐛 Debug Mode (Hiển thị search details)", value=True)
         
         # Model selection
         model_options = ["gpt-4o-mini", "gpt-3.5-turbo", "gpt-4", "gpt-4-turbo-preview"]
@@ -656,7 +684,7 @@ def main():
             if st.button("🗑️ Xóa chat", use_container_width=True):
                 try:
                     st.session_state.messages = [
-                        {"role": "system", "content": get_system_prompt()},
+                        {"role": "system", "content": get_strict_system_prompt()},
                         {"role": "assistant", "content": get_welcome_message()}
                     ]
                     st.rerun()
@@ -664,22 +692,12 @@ def main():
                     st.error(f"Lỗi xóa chat: {e}")
         
         st.markdown("---")
-        st.markdown("### 📚 Lĩnh vực chuyên môn")
-        st.markdown("• Luật Khoáng sản và Luật Địa chất Khoáng sản")
-        st.markdown("• Nghị định hướng dẫn thi hành")
-        st.markdown("• Thông tư Bộ TN&MT")
-        st.markdown("• Thủ tục cấp phép")
-        st.markdown("• Thuế, phí khoáng sản")
-        st.markdown("• Xử phạt vi phạm")
-        st.markdown("• Bảo vệ môi trường")
-        
-        st.markdown("---")
-        st.markdown("### 🛡️ Đảm bảo chính xác")
-        st.success("✅ Improved search algorithm")
-        st.success("✅ Enhanced confidence scoring")
-        st.success("✅ Legal document validation")
+        st.markdown("### 🛡️ Safe Mode Features")
+        st.success("✅ Anti-hallucination prompts")
         st.success("✅ Source verification")
-        st.info("💡 Search được cải tiến để chính xác hơn")
+        st.success("✅ Confidence scoring")
+        st.success("✅ Debug search results")
+        st.info("💡 Ngăn AI bịa đặt thông tin pháp luật")
     
     # Check API key
     if not st.secrets.get("OPENAI_API_KEY"):
@@ -719,12 +737,7 @@ Tôi chỉ có thể tư vấn về các vấn đề liên quan đến:
 - 🌱 Bảo vệ môi trường trong hoạt động khoáng sản
 - ⚠️ Xử phạt vi phạm hành chính
 
-Bạn có thể hỏi tôi về những vấn đề này không? Ví dụ:
-- "Thủ tục xin phép khai thác đá như thế nào?"
-- "Mức thuế tài nguyên hiện tại ra sao?"
-- "Vi phạm trong khai thác khoáng sản bị phạt như thế nào?"
-
-Tôi sẵn sàng hỗ trợ bạn! 😊"""
+Bạn có thể hỏi tôi về những vấn đề này không? Tôi sẵn sàng hỗ trợ bạn! 😊"""
             
             st.session_state.messages.append({"role": "assistant", "content": polite_refusal})
             st.markdown(f'<div class="assistant-message">{polite_refusal}</div>', 
@@ -740,38 +753,148 @@ Tôi sẵn sàng hỗ trợ bạn! 😊"""
             search_results = []
             final_prompt = prompt
             
-            # Improved web search if enabled
+            # DEBUG/Improved web search if enabled
             if web_search_enabled and should_search_web(prompt):
-                with st.status("🔍 Đang tìm kiếm văn bản pháp luật với thuật toán cải tiến...", expanded=False) as status:
-                    search_results = advanced_web_search_improved(prompt)
+                with st.status("🔍 Đang tìm kiếm văn bản pháp luật với thuật toán cải tiến...", expanded=debug_mode) as status:
                     
-                    if search_results:
-                        # Đếm nguồn ưu tiên và độ tin cậy cao
+                    if debug_mode:
+                        # DEBUG: Hiển thị search process
+                        st.write("🔍 **DEBUG: Search Process**")
+                        st.write(f"📝 Query: {prompt}")
+                        st.write(f"🎯 Is mineral related: {is_mineral_related(prompt)}")
+                        st.write(f"🔎 Should search web: {should_search_web(prompt)}")
+                    
+                    # Perform search với debug info
+                    search_results = []
+                    try:
+                        if debug_mode:
+                            st.write("⏳ Đang gọi search function...")
+                        search_results = advanced_web_search_improved(prompt)
+                        if debug_mode:
+                            st.write(f"✅ Search completed. Found {len(search_results)} results")
+                    except Exception as e:
+                        st.error(f"❌ Search failed: {str(e)}")
+                        if debug_mode:
+                            st.code(traceback.format_exc())
+                    
+                    # DEBUG: Hiển thị RAW search results
+                    if search_results and debug_mode:
+                        st.markdown("### 🔍 **RAW SEARCH RESULTS:**")
+                        
+                        for i, result in enumerate(search_results, 1):
+                            with st.expander(f"Result {i}: {result.get('title', 'No title')[:50]}...", expanded=False):
+                                st.json({
+                                    "title": result.get('title', ''),
+                                    "content": result.get('content', '')[:500] + "..." if len(result.get('content', '')) > 500 else result.get('content', ''),
+                                    "url": result.get('url', ''),
+                                    "source": result.get('source', ''),
+                                    "priority": result.get('priority', False),
+                                    "confidence": result.get('confidence', 0),
+                                    "document_type": result.get('document_type', 'Unknown')
+                                })
+                        
+                        # Thống kê search results
                         priority_count = sum(1 for r in search_results if r.get('priority'))
                         high_confidence_count = sum(1 for r in search_results if r.get('confidence', 0) > 0.7)
                         very_high_confidence_count = sum(1 for r in search_results if r.get('confidence', 0) > 0.85)
+                        avg_confidence = sum(r.get('confidence', 0) for r in search_results) / len(search_results)
                         
+                        st.markdown("### 📊 **SEARCH STATISTICS:**")
+                        col1, col2, col3, col4 = st.columns(4)
+                        with col1:
+                            st.metric("Total Results", len(search_results))
+                        with col2:
+                            st.metric("Priority Sources ⭐", priority_count)
+                        with col3:
+                            st.metric("High Confidence (>0.7)", high_confidence_count)
+                        with col4:
+                            st.metric("Avg Confidence", f"{avg_confidence:.2f}")
+                        
+                        # Quality assessment
                         if very_high_confidence_count > 0:
-                            st.success(f"🎯 Tìm thấy {len(search_results)} kết quả ({very_high_confidence_count} rất tin cậy, {priority_count} nguồn ưu tiên)")
+                            st.success(f"🎯 **EXCELLENT**: {very_high_confidence_count} very high confidence results")
                         elif high_confidence_count > 0:
-                            st.success(f"✅ Tìm thấy {len(search_results)} kết quả ({high_confidence_count} tin cậy cao, {priority_count} nguồn ưu tiên)")
+                            st.success(f"✅ **GOOD**: {high_confidence_count} high confidence results")
+                        elif priority_count > 0:
+                            st.warning(f"⚠️ **MEDIUM**: {priority_count} priority sources but low confidence")
                         else:
-                            st.warning(f"⚠️ Tìm thấy {len(search_results)} kết quả ({priority_count} nguồn ưu tiên) - Độ tin cậy trung bình")
+                            st.error("❌ **POOR**: No high-quality results found")
+                    
+                    if search_results:
+                        # Create safe prompt
+                        final_prompt = create_safe_enhanced_search_prompt(prompt, search_results)
                         
-                        # Hiển thị kết quả với confidence scores và document types
-                        for i, result in enumerate(search_results, 1):
-                            priority_mark = "⭐ " if result.get('priority') else ""
-                            confidence = result.get('confidence', 0)
-                            confidence_color = "🟢" if confidence > 0.85 else "🟡" if confidence > 0.7 else "🟠" if confidence > 0.5 else "🔴"
-                            doc_type = result.get('document_type', 'Văn bản')
+                        # DEBUG: Hiển thị final prompt
+                        if debug_mode:
+                            with st.expander("🤖 **FINAL PROMPT TO AI** (Click to expand)", expanded=False):
+                                st.code(final_prompt[:2000] + "..." if len(final_prompt) > 2000 else final_prompt)
+                        
+                        # Show summary for non-debug mode
+                        if not debug_mode:
+                            priority_count = sum(1 for r in search_results if r.get('priority'))
+                            high_confidence_count = sum(1 for r in search_results if r.get('confidence', 0) > 0.7)
+                            very_high_confidence_count = sum(1 for r in search_results if r.get('confidence', 0) > 0.85)
                             
-                            st.write(f"**{priority_mark}{i}. {doc_type}** {confidence_color} [{confidence:.2f}]: {result['title'][:60]}...")
+                            if very_high_confidence_count > 0:
+                                st.success(f"🎯 Tìm thấy {len(search_results)} kết quả ({very_high_confidence_count} rất tin cậy)")
+                            elif high_confidence_count > 0:
+                                st.success(f"✅ Tìm thấy {len(search_results)} kết quả ({high_confidence_count} tin cậy cao)")
+                            else:
+                                st.warning(f"⚠️ Tìm thấy {len(search_results)} kết quả (độ tin cậy thấp)")
                         
-                        final_prompt = create_enhanced_search_prompt(prompt, search_results)
-                        status.update(label="✅ Hoàn tất tìm kiếm với thuật toán cải tiến", state="complete", expanded=False)
+                        status.update(label="✅ Search completed with safe mode", state="complete", expanded=False)
+                        
                     else:
-                        st.warning("⚠️ Không tìm thấy văn bản pháp luật liên quan - Sẽ trả lời từ kiến thức có sẵn")
-                        status.update(label="⚠️ Không tìm thấy văn bản liên quan", state="complete", expanded=False)
+                        if debug_mode:
+                            st.error("❌ **NO SEARCH RESULTS FOUND**")
+                            st.markdown("### 🔍 **Possible reasons:**")
+                            st.markdown("- API calls failed")
+                            st.markdown("- No relevant content found") 
+                            st.markdown("- Content filtering too strict")
+                            st.markdown("- Network/timeout issues")
+                            
+                            # Test basic connectivity
+                            st.markdown("### 🧪 **Connectivity Test:**")
+                            try:
+                                test_response = requests.get("https://api.duckduckgo.com/", timeout=5)
+                                st.success(f"✅ DuckDuckGo API reachable (Status: {test_response.status_code})")
+                            except Exception as e:
+                                st.error(f"❌ DuckDuckGo API unreachable: {e}")
+                        
+                        # Fallback safe response
+                        final_prompt = f"""
+{prompt}
+
+CRITICAL: Search function failed completely. No results found.
+HƯỚNG DẪN TRẢ LỜI AN TOÀN:
+1. TUYỆT ĐỐI KHÔNG được bịa đặt thông tin pháp luật
+2. Chỉ được nói về nguyên tắc chung
+3. PHẢI khuyến nghị tham khảo nguồn chính thống
+
+Hãy trả lời: "Tôi gặp lỗi khi tìm kiếm thông tin pháp luật về vấn đề này. Để có thông tin chính xác nhất, bạn vui lòng:
+
+1. Truy cập trực tiếp thuvienphapluat.vn
+2. Tìm kiếm với từ khóa liên quan đến câu hỏi
+3. Liên hệ Sở Tài nguyên và Môi trường địa phương
+4. Tham khảo Luật Khoáng sản hiện hành
+
+Xin lỗi vì sự bất tiện này."
+"""
+                        
+                        status.update(label="❌ Search failed - using safe fallback", state="error", expanded=False)
+            
+            else:
+                if debug_mode:
+                    st.info("🔍 **Search disabled** or query not eligible for web search")
+                final_prompt = f"""
+{prompt}
+
+QUAN TRỌNG: Không có tìm kiếm web được thực hiện.
+HƯỚNG DẪN TRẢ LỜI AN TOÀN:
+1. TUYỆT ĐỐI KHÔNG được bịa đặt số luật, số điều, số khoản
+2. Chỉ được nói về các nguyên tắc chung về pháp luật khoáng sản
+3. PHẢI khuyến nghị tham khảo nguồn chính thống để có thông tin chính xác
+"""
             
             # Count input tokens
             messages_for_api = [
