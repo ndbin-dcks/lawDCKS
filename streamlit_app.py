@@ -6,7 +6,7 @@ from datetime import datetime
 
 st.set_page_config(page_title="AI Pháp chế Khoáng sản", page_icon="⚖️", layout="wide")
 
-# ---- Nhập API key và Assistant ID ----
+# === Nhập key ===
 def get_secret_or_input(secret_key, label, password=True):
     if secret_key in st.secrets:
         return st.secrets[secret_key]
@@ -16,7 +16,7 @@ def get_secret_or_input(secret_key, label, password=True):
 openai.api_key = get_secret_or_input("OPENAI_API_KEY", "Nhập OpenAI API Key:")
 ASSISTANT_ID = get_secret_or_input("ASSISTANT_ID", "Nhập Assistant ID:", password=False)
 
-# ---- SQLite: khởi tạo, lưu và load chat ----
+# === SQLite: init, save, load ===
 def init_db():
     conn = sqlite3.connect('chat_history.db')
     c = conn.cursor()
@@ -50,7 +50,7 @@ def load_chat(thread_id):
 
 st.title("⚖️ AI Pháp chế Khoáng sản")
 
-# ---- Tạo thread Assistant (1 lần/phiên) ----
+# === Tạo thread (1 lần/phiên) ===
 if openai.api_key and ASSISTANT_ID:
     if "thread_id" not in st.session_state:
         try:
@@ -63,7 +63,27 @@ else:
     st.warning("Vui lòng nhập OpenAI API Key và Assistant ID để sử dụng hệ thống.")
     thread_id = None
 
-# ---- Hiển thị lịch sử chat dạng bong bóng ----
+# === System prompt tối ưu cho pháp chế chuyển tiếp ===
+LEGAL_SYSTEM_PROMPT = """
+Em là **Tuấn Anh** - Trợ lý AI chuyên pháp luật khoáng sản Việt Nam. Trả lời phải:
+- Ưu tiên đúng timeline chuyển tiếp: Luật 54/2024/QH15 (từ 01/07/2025) thay Luật 60/2010; Bộ TN&MT hợp nhất BNNMT (từ 01/03/2025).
+- Chỉ trả lời dựa trên văn bản còn hiệu lực, ưu tiên Luật > Nghị định > Thông tư, trích dẫn chính xác Điều/Khoản, số hiệu, cơ quan ban hành, ngày hiệu lực.
+- Nhận biết, báo rõ nếu Điều/Khoản đã hết hiệu lực, bị thay thế hoặc thuộc transition period.
+- Format trả lời:
+---
+## 📋 TÓM TẮT PHÁP LÝ
+[Tóm tắt trả lời, lưu ý timeline/chuyển tiếp]
+
+## 📚 CĂN CỨ PHÁP LÝ
+- [Luật/NĐ/TT, Điều, Khoản, số hiệu, trích dẫn]
+
+## ⚖️ METADATA
+Hiệu lực: [ngày kiểm tra], Cơ quan: [BTNMT/BNNMT], Timeline: [trước/sau 01/07/2025], Website: mae.gov.vn
+---
+Nếu không đủ căn cứ hoặc gặp xung đột pháp luật, phải cảnh báo rõ, khuyến nghị kiểm tra lại hoặc hỏi BNNMT.
+"""
+
+# === Giao diện chat bong bóng ===
 if thread_id:
     chat_history = load_chat(thread_id)
     st.markdown('<div style="height:400px;overflow-y:auto;border:1px solid #ddd;padding:8px 0 8px 0;background:#f9f9f9">', unsafe_allow_html=True)
@@ -88,7 +108,7 @@ if thread_id:
                 """, unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # ---- Nhập câu hỏi ----
+    # === Nhập câu hỏi ===
     with st.form(key="qa_form", clear_on_submit=True):
         user_input = st.text_area(
             "Nhập câu hỏi pháp luật:",
@@ -97,13 +117,13 @@ if thread_id:
         )
         submitted = st.form_submit_button("Gửi")
 
-    # ---- Xử lý gửi câu hỏi ----
+    # ---- Gửi câu hỏi ----
     if submitted and user_input.strip():
         save_chat(thread_id, "user", user_input)
         st.session_state["pending_ai"] = user_input
         st.rerun()
 
-    # ---- Xử lý trả lời AI khi có pending_ai (chỉ 1 lần sau mỗi submit) ----
+    # ---- Xử lý trả lời AI (chỉ 1 lần sau mỗi submit) ----
     if st.session_state.get("pending_ai"):
         user_input = st.session_state.pop("pending_ai")
         try:
@@ -113,11 +133,11 @@ if thread_id:
                 role="user",
                 content=user_input
             )
+            # Chạy assistant với prompt tối ưu hóa cho nghiệp vụ
             run = openai.beta.threads.runs.create(
                 thread_id=thread_id,
                 assistant_id=ASSISTANT_ID,
-                temperature=0.1,
-                max_tokens=800
+                instructions=LEGAL_SYSTEM_PROMPT
             )
             status = "in_progress"
             with st.spinner("AI pháp chế đang xử lý..."):
