@@ -34,12 +34,13 @@ st.set_page_config(
     layout="wide"
 )
 
-# ==> DEBUG CODE <===
+# ==> DEBUG CODE - ENHANCED <===
 if st.sidebar.checkbox("🔍 Debug Mode"):
     st.sidebar.write("**Debug Information:**")
     if hasattr(st, 'secrets'):
         st.sidebar.write("Available secrets keys:", list(st.secrets.keys()))
 
+    # Test API Key
     if hasattr(st, 'secrets') and "OPENAI_API_KEY" in st.secrets:
         api_key = st.secrets["OPENAI_API_KEY"]
         st.sidebar.write(f"✅ API key found: {api_key[:15]}...")
@@ -56,13 +57,55 @@ if st.sidebar.checkbox("🔍 Debug Mode"):
                 messages=[{"role": "user", "content": "Hello"}],
                 max_tokens=5
             )
-            st.sidebar.write("✅ API call successful!")
+            st.sidebar.write("✅ Basic API call successful!")
+            
+            # Test Responses API with file search
+            if st.sidebar.button("🧪 Test Responses API"):
+                try:
+                    vector_store_ids = get_vector_store_ids()
+                    
+                    params = {
+                        "model": "gpt-4o",
+                        "input": [
+                            {"role": "system", "content": "Bạn là AI chuyên về pháp luật khoáng sản Việt Nam."},
+                            {"role": "user", "content": "Điều 2 Luật Khoáng sản 2010 quy định gì?"}
+                        ],
+                        "store": True
+                    }
+                    
+                    if vector_store_ids:
+                        params["tools"] = [{"type": "file_search", "vector_store_ids": vector_store_ids}]
+                        st.sidebar.write(f"🔍 Using vector stores: {vector_store_ids}")
+                    
+                    response = client.responses.create(**params)
+                    response_text = response.output_text if hasattr(response, 'output_text') else str(response.output)
+                    
+                    st.sidebar.write("✅ Responses API test successful!")
+                    st.sidebar.write(f"📄 Response preview: {response_text[:100]}...")
+                    
+                except Exception as e:
+                    st.sidebar.write(f"❌ Responses API Error: {e}")
             
         except Exception as e:
             st.sidebar.write(f"❌ Error: {e}")
             
     else:
         st.sidebar.write("❌ OPENAI_API_KEY not found in secrets")
+    
+    # Test Vector Store IDs
+    if hasattr(st, 'secrets') and "VECTOR_STORE_IDS" in st.secrets:
+        vs_ids = st.secrets["VECTOR_STORE_IDS"]
+        st.sidebar.write(f"✅ VECTOR_STORE_IDS found: {vs_ids}")
+        
+        # Parse vector store IDs
+        if isinstance(vs_ids, str):
+            parsed_ids = [id.strip() for id in vs_ids.split(",") if id.strip()]
+            st.sidebar.write(f"📋 Parsed IDs: {parsed_ids}")
+        else:
+            st.sidebar.write(f"📋 Raw value: {vs_ids}")
+            
+    else:
+        st.sidebar.write("❌ VECTOR_STORE_IDS not found in secrets")
         
     st.sidebar.write("---")
 # ==> END DEBUG CODE <===
@@ -321,7 +364,7 @@ def get_vector_store_ids():
     return vector_store_ids
 
 def get_ai_response(client, question: str, conversation_history: List[Dict]) -> str:
-    """Get AI response using Responses API"""
+    """Get AI response using Responses API - FIXED FORMAT"""
     try:
         # Prepare messages
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -336,7 +379,7 @@ def get_ai_response(client, question: str, conversation_history: List[Dict]) -> 
         # Get vector store IDs
         vector_store_ids = get_vector_store_ids()
         
-        # Prepare API parameters
+        # Prepare API parameters - EXACTLY LIKE WORKING SCRIPT
         params = {
             "model": "gpt-4o",
             "input": messages,
@@ -344,15 +387,24 @@ def get_ai_response(client, question: str, conversation_history: List[Dict]) -> 
             "store": True
         }
         
-        # Add file search if vector stores available
+        # Add file search if vector stores available - FIXED FORMAT
         if vector_store_ids:
+            # EXACTLY like working script: [{"type": "file_search", "vector_store_ids": [VECTOR_STORE_ID]}]
             params["tools"] = [{"type": "file_search", "vector_store_ids": vector_store_ids}]
             logger.info(f"Using vector stores: {vector_store_ids}")
+        else:
+            logger.warning("No vector stores configured")
+        
+        # Log API call like working script
+        logger.debug(f"Calling Responses API with params: {params}")
         
         # Make API call
         response = client.responses.create(**params)
         
-        # Extract response text
+        # Log response like working script  
+        logger.debug(f"Response: {response.model_dump_json(indent=2) if hasattr(response, 'model_dump_json') else str(response)}")
+        
+        # Extract response text - EXACTLY like working script
         response_text = response.output_text if hasattr(response, 'output_text') else str(response.output)
         
         logger.info("Responses API call successful")
@@ -403,12 +455,31 @@ def main():
         
         # Configuration panel
         with st.expander("⚙️ Cấu hình"):
-            st.write("**Vector Store IDs:**")
+            st.write("**OPENAI_API_KEY:**")
+            if hasattr(st, 'secrets') and "OPENAI_API_KEY" in st.secrets:
+                api_key = st.secrets["OPENAI_API_KEY"]
+                st.success(f"✅ Configured: {api_key[:15]}...")
+            else:
+                st.error("❌ Not configured")
+                
+            st.write("**VECTOR_STORE_IDS:**")
+            vector_store_ids = get_vector_store_ids()
             if vector_store_ids:
+                st.success(f"✅ Configured: {len(vector_store_ids)} stores")
                 for i, vs_id in enumerate(vector_store_ids):
                     st.code(f"{i+1}. {vs_id}")
             else:
-                st.info("Chưa cấu hình VECTOR_STORE_IDS")
+                st.error("❌ Not configured")
+                st.info("""
+                **Cách cấu hình:**
+                1. Click ⚙️ (Settings) → Advanced settings
+                2. Thêm (KHÔNG dùng [secrets]):
+                ```
+                OPENAI_API_KEY = "sk-proj-your-api-key"
+                VECTOR_STORE_IDS = "vs_68695626c77881918a6b72f1b9bdd4c9"
+                ```
+                3. Save → Restart app
+                """)
             
             if st.button("🔄 Reset Chat"):
                 st.session_state.messages = []
