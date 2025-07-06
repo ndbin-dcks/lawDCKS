@@ -472,26 +472,70 @@ def display_custom_chat(messages):
 # OPENAI RESPONSES API FUNCTIONS (FIXED)
 # ===============================
 
+def test_api_key_standalone():
+    """Test API key without caching"""
+    try:
+        # Get API key directly
+        api_key = None
+        source = ""
+        
+        if hasattr(st, 'secrets') and "OPENAI_API_KEY" in st.secrets:
+            api_key = st.secrets["OPENAI_API_KEY"].strip()
+            source = "Streamlit Secrets"
+        elif "OPENAI_API_KEY" in os.environ:
+            api_key = os.environ["OPENAI_API_KEY"].strip()
+            source = "Environment Variable"
+        
+        if not api_key:
+            return {"success": False, "error": "No API key found", "source": "None"}
+        
+        # Test client creation
+        client = openai.OpenAI(api_key=api_key)
+        
+        # Test API call
+        models = client.models.list()
+        
+        return {
+            "success": True, 
+            "source": source,
+            "api_key_format": f"{api_key[:15]}...{api_key[-10:]}",
+            "api_key_length": len(api_key),
+            "models_count": len(models.data)
+        }
+        
+    except Exception as e:
+        return {"success": False, "error": str(e), "source": source}
+
 @st.cache_resource
 def init_openai_client():
     """Initialize OpenAI client for Responses API"""
     try:
-        # Get API key
+        # Get API key - WITH BETTER DEBUGGING
         api_key = None
+        source = ""
         
         if hasattr(st, 'secrets') and "OPENAI_API_KEY" in st.secrets:
             api_key = st.secrets["OPENAI_API_KEY"]
+            source = "Streamlit Secrets"
         elif "OPENAI_API_KEY" in os.environ:
             api_key = os.environ["OPENAI_API_KEY"]
+            source = "Environment Variable"
         
         if not api_key:
             st.error("⚠️ Chưa cấu hình OPENAI_API_KEY")
-            st.info("💡 Vui lòng thêm API key vào Streamlit Advanced Settings")
+            st.info("💡 Vui lòng thêm API key vào Streamlit Advanced Settings hoặc Environment Variables")
             st.stop()
-            
+        
+        # CLEAN API KEY - Remove any whitespace/newlines
+        api_key = api_key.strip()
+        
+        # Debug info (safely)
+        logger.info(f"API Key source: {source}")
+        logger.info(f"API Key format: {api_key[:15]}...{api_key[-10:]} (length: {len(api_key)})")
+        
         # Validate API key format
-        if not api_key.startswith('sk-'):
-            st.error("⚠️ API key không đúng định dạng. Phải bắt đầu bằng 'sk-'")
+        if not (api_key.startswith('sk-') or api_key.startswith('sk-proj-')):
+            st.error(f"⚠️ API key không đúng định dạng. Phải bắt đầu bằng 'sk-' hoặc 'sk-proj-', nhưng tìm thấy: {api_key[:10]}...")
             st.stop()
         
         # Initialize client
@@ -499,14 +543,15 @@ def init_openai_client():
         
         # Test connection like working script
         try:
-            client.models.list()
+            models_response = client.models.list()
             logger.info("API key is valid")
-            st.success("✅ API key is valid")
+            st.success(f"✅ API key valid (from {source})")
             return client
         except Exception as e:
             logger.error(f"API key error: {str(e)}")
-            st.error(f"⚠️ Không thể kết nối đến OpenAI: {str(e)}")
-            st.info("💡 Kiểm tra API key và internet connection")
+            st.error(f"⚠️ Lỗi kết nối OpenAI: {str(e)}")
+            st.error(f"🔍 Debug: Key source={source}, length={len(api_key)}, starts_with={api_key[:10]}...")
+            st.info("💡 Kiểm tra API key và billing account")
             st.stop()
             
     except Exception as e:
@@ -676,9 +721,27 @@ def main():
     </div>
     """, unsafe_allow_html=True)
     
-    # Auto-initialize client
+    # Auto-initialize client with better error handling
     if not st.session_state.client:
-        st.session_state.client = init_openai_client()
+        with st.spinner("🔄 Initializing OpenAI client..."):
+            try:
+                st.session_state.client = init_openai_client()
+            except Exception as e:
+                st.error(f"❌ Failed to initialize client")
+                st.error(f"**Error:** {e}")
+                
+                # Quick fix suggestions
+                st.warning("""
+                **🔧 Quick Fixes:**
+                1. **Check API Key:** Go to Debug panel below → Test API Connection
+                2. **Verify Format:** API key should start with `sk-` or `sk-proj-`
+                3. **Check Billing:** Ensure OpenAI account has active billing
+                4. **Try New Key:** Create new API key at https://platform.openai.com/api-keys
+                """)
+                
+                # Still allow access to debug panel
+                st.info("💡 You can still use the Debug panel below to test your API key")
+                pass  # Don't stop, let user access debug panel
             
     # Main layout
     col1, col2 = st.columns([3, 1])
@@ -700,9 +763,12 @@ def main():
         # Display chat with custom styling
         display_custom_chat(st.session_state.messages)
         
-        # Chat input
-        if prompt := st.chat_input("Đặt câu hỏi về pháp luật khoáng sản..."):
-            handle_chat_with_responses_api(prompt)
+        # Chat input - Only if client is available
+        if st.session_state.client:
+            if prompt := st.chat_input("Đặt câu hỏi về pháp luật khoáng sản..."):
+                handle_chat_with_responses_api(prompt)
+        else:
+            st.chat_input("⚠️ Cần cấu hình API key trước khi chat (xem bên phải)", disabled=True)
     
     with col2:
         # Control panel
@@ -833,7 +899,14 @@ def main():
         # Debug info - ADDED
         with st.expander("🐞 Debug Info"):
             if st.button("📋 Show Current Config"):
+                api_source = "None"
+                if hasattr(st, 'secrets') and "OPENAI_API_KEY" in st.secrets:
+                    api_source = "Streamlit Secrets"
+                elif "OPENAI_API_KEY" in os.environ:
+                    api_source = "Environment Variable"
+                
                 st.code(f"""
+API Key Source: {api_source}
 API Key Configured: {bool((hasattr(st, 'secrets') and 'OPENAI_API_KEY' in st.secrets) or 'OPENAI_API_KEY' in os.environ)}
 Vector Store IDs: {get_vector_store_ids()}
 Model: {OPTIMIZED_PARAMS['model']}
@@ -841,16 +914,46 @@ Temperature: {OPTIMIZED_PARAMS['temperature']}
 Store: {OPTIMIZED_PARAMS['store']}
 """)
             
+            if st.button("🔄 Clear API Client Cache"):
+                init_openai_client.clear()
+                st.session_state.client = None
+                st.success("✅ Cache cleared! Reload page to reinitialize.")
+            
             if st.button("🔍 Test API Connection"):
+                with st.spinner("Testing API connection..."):
+                    result = test_api_key_standalone()
+                    
+                    if result["success"]:
+                        st.success("✅ API Connection OK")
+                        st.info(f"Source: {result['source']}")
+                        st.info(f"API Key: {result['api_key_format']} (length: {result['api_key_length']})")
+                        st.info(f"Available models: {result['models_count']} models")
+                    else:
+                        st.error(f"❌ API Connection Failed: {result['error']}")
+                        st.info(f"Source: {result['source']}")
+                        
+                        if "invalid_api_key" in result['error']:
+                            st.warning("""
+                            💡 **API Key Issues:**
+                            - Check if key is complete (no truncation)
+                            - Verify billing account is active
+                            - Try creating a new API key
+                            - Make sure key has gpt-4o access
+                            """)
+                        
                 if st.session_state.client:
                     try:
+                        # Additional test for current client
                         models = st.session_state.client.models.list()
-                        st.success("✅ API Connection OK")
-                        st.info(f"Available models: {len(models.data)} models")
-                    except Exception as e:
-                        st.error(f"❌ API Connection Failed: {e}")
+                        gpt4o_available = any(model.id == "gpt-4o" for model in models.data)
+                        if gpt4o_available:
+                            st.success("✅ Current client: gpt-4o model available")
+                        else:
+                            st.warning("⚠️ Current client: gpt-4o model not found")
+                    except:
+                        st.warning("⚠️ Current client has issues")
                 else:
-                    st.error("❌ No client initialized")
+                    st.info("ℹ️ No active client (will auto-initialize on app start)")
 
 def load_chat_session(session_id):
     """Load specific chat session"""
