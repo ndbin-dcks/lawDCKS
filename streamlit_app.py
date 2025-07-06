@@ -14,7 +14,18 @@ MODEL = "gpt-4o"
 # Khởi tạo client OpenAI
 @st.cache_resource
 def init_client():
-    return openai.OpenAI(api_key=st.secrets["openai"]["api_key"])
+    try:
+        # Kiểm tra cấu trúc secrets
+        if "openai" in st.secrets and "api_key" in st.secrets["openai"]:
+            api_key = st.secrets["openai"]["api_key"]
+        elif "api_key" in st.secrets:
+            api_key = st.secrets["api_key"]
+        else:
+            raise KeyError("Không tìm thấy API key trong st.secrets. Vui lòng thêm 'api_key' hoặc '[openai] api_key' trong App Settings.")
+        return openai.OpenAI(api_key=api_key)
+    except KeyError as e:
+        st.error(str(e))
+        st.stop()
 
 def check_api_key(client) -> bool:
     """Kiểm tra tính hợp lệ của API key"""
