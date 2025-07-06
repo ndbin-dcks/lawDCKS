@@ -1,10 +1,8 @@
 import streamlit as st
-import time
 import json
 import os
 from datetime import datetime
 from typing import List, Dict, Any, Optional
-import sqlite3
 import uuid
 import warnings
 
@@ -12,7 +10,8 @@ import warnings
 try:
     import openai
 except ImportError:
-    st.error("Lỗi: Không thể import OpenAI. Vui lòng kiểm tra requirements.txt")
+    st.error("❌ Lỗi: Không thể import OpenAI. Đang cài đặt...")
+    st.code("pip install openai", language="bash")
     st.stop()
 
 # Suppress warnings
@@ -23,15 +22,12 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 # ===============================
 
 # Page config
-try:
-    st.set_page_config(
-        page_title="AI Agent Pháp Chế Khoáng Sản",
-        page_icon="⚖️",
-        layout="wide",
-        initial_sidebar_state="expanded"
-    )
-except Exception as e:
-    st.error(f"Lỗi cấu hình trang: {e}")
+st.set_page_config(
+    page_title="AI Agent Pháp Chế Khoáng Sản",
+    page_icon="⚖️",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
 # Custom CSS cho giao diện chat đẹp
 st.markdown("""
@@ -207,16 +203,23 @@ header {visibility: hidden;}
     border-radius: 15px;
     margin: 20px 0;
 }
+
+/* Session management */
+.session-item {
+    background: #f8f9fa;
+    padding: 10px;
+    border-radius: 8px;
+    margin: 5px 0;
+    border-left: 4px solid #667eea;
+}
 </style>
 """, unsafe_allow_html=True)
 
-# Optimized parameters for Responses API
+# Optimized parameters for API calls
 OPTIMIZED_PARAMS = {
-    "model": "gpt-4o",  # Latest model
+    "model": "gpt-4o",
     "temperature": 0.1,
     "max_tokens": 4000,
-    "store": True,  # Enable state management
-    "stream": False,  # Can be set to True for streaming
 }
 
 # Enhanced system prompt
@@ -256,153 +259,96 @@ TUYỆT ĐỐI KHÔNG ĐƯỢC:
 """
 
 # ===============================
-# DATABASE FUNCTIONS
+# SESSION STATE MANAGEMENT
 # ===============================
 
-def init_database():
-    """Initialize SQLite database for chat history"""
-    conn = sqlite3.connect('chat_history.db')
-    cursor = conn.cursor()
+def init_session_state():
+    """Initialize all session state variables"""
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
     
-    # Create tables
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS chat_sessions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_id TEXT UNIQUE NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        title TEXT,
-        api_type TEXT DEFAULT 'responses',
-        response_id TEXT
-    )
-    ''')
+    if "chat_sessions" not in st.session_state:
+        st.session_state.chat_sessions = {}
     
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS chat_messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_id TEXT NOT NULL,
-        role TEXT NOT NULL,
-        content TEXT NOT NULL,
-        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        metadata TEXT,
-        FOREIGN KEY (session_id) REFERENCES chat_sessions (session_id)
-    )
-    ''')
+    if "current_session_id" not in st.session_state:
+        st.session_state.current_session_id = None
     
-    # Create indexes for performance
-    cursor.execute('''
-    CREATE INDEX IF NOT EXISTS idx_session_last_activity 
-    ON chat_sessions(last_activity)
-    ''')
+    if "client" not in st.session_state:
+        st.session_state.client = None
     
-    cursor.execute('''
-    CREATE INDEX IF NOT EXISTS idx_messages_session_time 
-    ON chat_messages(session_id, timestamp)
-    ''')
-    
-    conn.commit()
-    conn.close()
+    if "api_status" not in st.session_state:
+        st.session_state.api_status = {"connected": False, "api_type": None}
 
 def create_chat_session():
-    """Create new chat session"""
+    """Create new chat session using session state"""
     session_id = str(uuid.uuid4())
-    conn = sqlite3.connect('chat_history.db')
-    cursor = conn.cursor()
+    timestamp = datetime.now()
     
-    cursor.execute('''
-    INSERT INTO chat_sessions (session_id, title, api_type)
-    VALUES (?, ?, ?)
-    ''', (session_id, f"Chat {datetime.now().strftime('%H:%M %d/%m')}", "responses"))
+    # Create session data
+    session_data = {
+        "session_id": session_id,
+        "title": f"Chat {timestamp.strftime('%H:%M %d/%m')}",
+        "created_at": timestamp.isoformat(),
+        "last_activity": timestamp.isoformat(),
+        "messages": [],
+        "api_type": "responses"
+    }
     
-    conn.commit()
-    conn.close()
+    # Store in session state
+    st.session_state.chat_sessions[session_id] = session_data
     
     return session_id
 
-def save_message(session_id, role, content, metadata=None):
-    """Save message to database"""
-    conn = sqlite3.connect('chat_history.db')
-    cursor = conn.cursor()
+def save_message_to_session(session_id, role, content, metadata=None):
+    """Save message to session state"""
+    if session_id not in st.session_state.chat_sessions:
+        return
     
-    cursor.execute('''
-    INSERT INTO chat_messages (session_id, role, content, metadata)
-    VALUES (?, ?, ?, ?)
-    ''', (session_id, role, content, json.dumps(metadata) if metadata else None))
+    message = {
+        "role": role,
+        "content": content,
+        "timestamp": datetime.now().isoformat(),
+        "metadata": metadata
+    }
     
-    # Update last activity
-    cursor.execute('''
-    UPDATE chat_sessions 
-    SET last_activity = CURRENT_TIMESTAMP 
-    WHERE session_id = ?
-    ''', (session_id,))
-    
-    conn.commit()
-    conn.close()
-
-def load_chat_history(session_id):
-    """Load chat history from database"""
-    conn = sqlite3.connect('chat_history.db')
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-    SELECT role, content, timestamp, metadata
-    FROM chat_messages 
-    WHERE session_id = ?
-    ORDER BY timestamp ASC
-    ''', (session_id,))
-    
-    messages = []
-    for row in cursor.fetchall():
-        role, content, timestamp, metadata = row
-        messages.append({
-            "role": role,
-            "content": content,
-            "timestamp": timestamp,
-            "metadata": json.loads(metadata) if metadata else None
-        })
-    
-    conn.close()
-    return messages
+    st.session_state.chat_sessions[session_id]["messages"].append(message)
+    st.session_state.chat_sessions[session_id]["last_activity"] = datetime.now().isoformat()
 
 def get_chat_sessions():
-    """Get all chat sessions"""
-    conn = sqlite3.connect('chat_history.db')
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-    SELECT session_id, title, created_at, last_activity, api_type,
-           (SELECT COUNT(*) FROM chat_messages WHERE session_id = cs.session_id) as message_count
-    FROM chat_sessions cs
-    ORDER BY last_activity DESC
-    ''')
-    
+    """Get all chat sessions from session state"""
     sessions = []
-    for row in cursor.fetchall():
+    for session_id, session_data in st.session_state.chat_sessions.items():
         sessions.append({
-            "session_id": row[0],
-            "title": row[1],
-            "created_at": row[2],
-            "last_activity": row[3],
-            "api_type": row[4],
-            "message_count": row[5]
+            "session_id": session_id,
+            "title": session_data["title"],
+            "created_at": session_data["created_at"],
+            "last_activity": session_data["last_activity"],
+            "message_count": len(session_data["messages"]),
+            "api_type": session_data.get("api_type", "responses")
         })
     
-    conn.close()
+    # Sort by last activity
+    sessions.sort(key=lambda x: x["last_activity"], reverse=True)
     return sessions
 
+def load_chat_session(session_id):
+    """Load specific chat session"""
+    if session_id in st.session_state.chat_sessions:
+        st.session_state.messages = st.session_state.chat_sessions[session_id]["messages"].copy()
+        st.session_state.current_session_id = session_id
+        return True
+    return False
+
 def delete_chat_session(session_id):
-    """Delete chat session and all messages"""
-    conn = sqlite3.connect('chat_history.db')
-    cursor = conn.cursor()
-    
-    cursor.execute('DELETE FROM chat_messages WHERE session_id = ?', (session_id,))
-    cursor.execute('DELETE FROM chat_sessions WHERE session_id = ?', (session_id,))
-    
-    conn.commit()
-    conn.close()
+    """Delete chat session"""
+    if session_id in st.session_state.chat_sessions:
+        del st.session_state.chat_sessions[session_id]
+        if st.session_state.current_session_id == session_id:
+            st.session_state.current_session_id = None
+            st.session_state.messages = []
 
 # ===============================
-# CUSTOM CHAT DISPLAY FUNCTIONS
+# DISPLAY FUNCTIONS
 # ===============================
 
 def display_custom_chat(messages):
@@ -411,7 +357,7 @@ def display_custom_chat(messages):
         st.markdown("""
         <div class="welcome-message">
             <h3>💬 AI Agent Pháp Chế Khoáng Sản</h3>
-            <p>Sử dụng <strong>OpenAI Responses API mới nhất (2025)</strong></p>
+            <p>Sử dụng <strong>OpenAI API với Response/Chat Completions</strong></p>
             <p>Đặt câu hỏi bên dưới để bắt đầu cuộc trò chuyện</p>
         </div>
         """, unsafe_allow_html=True)
@@ -419,29 +365,23 @@ def display_custom_chat(messages):
     
     chat_html = '<div class="chat-container">'
     
-    for i, message in enumerate(messages):
+    for message in messages:
         timestamp = message.get("timestamp", "")
-        if timestamp:
-            # Parse timestamp if it's a string
-            if isinstance(timestamp, str):
-                try:
-                    if 'T' in timestamp:
-                        dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
-                    else:
-                        dt = datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S')
-                    time_str = dt.strftime('%H:%M')
-                except:
-                    time_str = timestamp.split(' ')[1][:5] if ' ' in timestamp else ""
-            else:
-                time_str = ""
-        else:
-            time_str = ""
+        time_str = ""
         
-        # Escape HTML in content
+        if timestamp:
+            try:
+                if 'T' in timestamp:
+                    dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                else:
+                    dt = datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S')
+                time_str = dt.strftime('%H:%M')
+            except:
+                time_str = ""
+        
+        # Escape HTML and format content
         content = message["content"].replace('<', '&lt;').replace('>', '&gt;')
-        # Convert markdown bold to HTML
         content = content.replace('**', '<strong>').replace('**', '</strong>')
-        # Convert newlines to <br>
         content = content.replace('\n', '<br>')
         
         if message["role"] == "user":
@@ -454,73 +394,83 @@ def display_custom_chat(messages):
             {f'<div class="chat-info">👤 Bạn • {time_str}</div>' if time_str else '<div class="chat-info">👤 Bạn</div>'}
             '''
         else:  # assistant
+            api_info = ""
+            if message.get("metadata") and message["metadata"].get("api_used"):
+                api_type = message["metadata"]["api_used"]
+                if api_type == "responses":
+                    api_info = " (Responses API)"
+                elif api_type == "chat_completions":
+                    api_info = " (Chat API)"
+            
             chat_html += f'''
             <div class="ai-message">
                 <div class="ai-bubble">
                     {content}
                 </div>
             </div>
-            {f'<div class="chat-info">⚖️ AI Agent (Responses API) • {time_str}</div>' if time_str else '<div class="chat-info">⚖️ AI Agent (Responses API)</div>'}
+            {f'<div class="chat-info">⚖️ AI Agent{api_info} • {time_str}</div>' if time_str else f'<div class="chat-info">⚖️ AI Agent{api_info}</div>'}
             '''
     
     chat_html += '</div>'
     st.markdown(chat_html, unsafe_allow_html=True)
 
 # ===============================
-# OPENAI RESPONSES API FUNCTIONS
+# OPENAI API FUNCTIONS
 # ===============================
 
-@st.cache_resource
 def init_openai_client():
-    """Initialize OpenAI client for Responses API"""
+    """Initialize OpenAI client with proper error handling for Streamlit Cloud"""
     try:
-        # Get API key
-        api_key = None
-        
-        if hasattr(st, 'secrets') and "OPENAI_API_KEY" in st.secrets:
-            api_key = st.secrets["OPENAI_API_KEY"]
-        elif "OPENAI_API_KEY" in os.environ:
-            api_key = os.environ["OPENAI_API_KEY"]
+        # Get API key from Streamlit secrets
+        api_key = st.secrets.get("OPENAI_API_KEY")
         
         if not api_key:
-            st.error("⚠️ Chưa cấu hình OPENAI_API_KEY")
-            st.info("💡 Vui lòng thêm API key vào Streamlit Advanced Settings")
+            st.error("❌ **Chưa cấu hình OPENAI_API_KEY**")
+            st.info("""
+            📝 **Hướng dẫn setup Streamlit Cloud:**
+            1. Vào **App settings** → **Secrets**
+            2. Thêm:
+            ```toml
+            OPENAI_API_KEY = "sk-your-key-here"
+            ```
+            3. Save và deploy lại
+            """)
             st.stop()
             
         # Validate API key format
         if not api_key.startswith('sk-'):
-            st.error("⚠️ API key không đúng định dạng. Phải bắt đầu bằng 'sk-'")
+            st.error("❌ **API key không đúng định dạng**")
+            st.info("API key phải bắt đầu bằng 'sk-'")
             st.stop()
         
         # Initialize client
         client = openai.OpenAI(api_key=api_key)
         
-        # Test connection với chat completions API (vì responses có thể chưa available)
+        # Test connection
         try:
-            # Test với chat completions trước
-            test_response = client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[{"role": "user", "content": "test"}],
-                max_tokens=1
-            )
+            # Test với lightweight call
+            test_response = client.models.list()
+            st.session_state.api_status = {"connected": True, "api_type": "openai"}
             return client
         except Exception as e:
-            st.error(f"⚠️ Không thể kết nối đến OpenAI: {str(e)}")
-            st.info("💡 Kiểm tra API key và internet connection")
+            st.error(f"❌ **Không thể kết nối OpenAI:** {str(e)}")
+            st.info("💡 Kiểm tra API key và thử lại")
+            st.session_state.api_status = {"connected": False, "api_type": None}
             st.stop()
             
     except Exception as e:
-        st.error(f"⚠️ Lỗi khởi tạo OpenAI client: {str(e)}")
+        st.error(f"❌ **Lỗi khởi tạo OpenAI client:** {str(e)}")
+        st.session_state.api_status = {"connected": False, "api_type": None}
         st.stop()
 
 def get_file_search_tools():
-    """Get file search tools configuration cho Responses API"""
-    # Check if we have files configured
-    file_ids = get_file_ids_from_config()
-    
+    """Get file search tools configuration"""
     tools = []
     
-    # File search tool
+    # Get file IDs from secrets
+    file_ids = st.secrets.get("FILE_IDS", "").split(",") if st.secrets.get("FILE_IDS") else []
+    file_ids = [fid.strip() for fid in file_ids if fid.strip()]
+    
     if file_ids:
         tools.append({
             "type": "file_search",
@@ -530,112 +480,94 @@ def get_file_search_tools():
             }
         })
     else:
-        # Default file search
+        # Default file search without specific files
         tools.append({"type": "file_search"})
     
-    # Web search tool (nếu có)
-    # tools.append({"type": "web_search"})
-    
-    return tools
+    return tools, len(file_ids)
 
-def get_file_ids_from_config():
-    """Get file IDs from config sources"""
-    # You can configure file IDs in Advanced Settings
-    if hasattr(st, 'secrets') and "FILE_IDS" in st.secrets:
-        return st.secrets["FILE_IDS"].split(",")
-    elif "FILE_IDS" in os.environ:
-        return os.environ["FILE_IDS"].split(",")
+def prepare_messages(question: str, conversation_history: List[Dict]) -> List[Dict]:
+    """Prepare messages for OpenAI API"""
+    messages = []
     
-    return []
-
-def prepare_input_messages(question: str, conversation_history: List[Dict]) -> List[Dict]:
-    """Chuẩn bị input messages cho Responses API"""
-    input_messages = []
-    
-    # Add system message vào đầu
-    input_messages.append({
+    # Add system message
+    messages.append({
         "role": "system", 
         "content": SYSTEM_PROMPT
     })
     
     # Add conversation history
     for msg in conversation_history:
-        input_messages.append({
+        messages.append({
             "role": msg["role"],
             "content": msg["content"]
         })
     
     # Add current question
-    input_messages.append({
+    messages.append({
         "role": "user",
         "content": question
     })
     
-    return input_messages
+    return messages
 
-def get_response_with_responses_api(client, question: str, conversation_history: List[Dict]) -> Dict[str, Any]:
-    """Get response using new Responses API"""
+def get_ai_response(client, question: str, conversation_history: List[Dict]) -> Dict[str, Any]:
+    """Get AI response with Response API fallback to Chat Completions"""
     try:
-        # Prepare input - Response API sử dụng format khác
-        input_messages = prepare_input_messages(question, conversation_history)
+        messages = prepare_messages(question, conversation_history)
+        tools, file_count = get_file_search_tools()
         
-        # Get tools
-        tools = get_file_search_tools()
-        
-        # Gọi Responses API với cú pháp mới
+        # Try Response API first (if available)
         try:
-            # Thử với Responses API trước
             response = client.responses.create(
                 model=OPTIMIZED_PARAMS["model"],
-                input=input_messages,  # Responses API dùng 'input' thay vì 'messages'
+                input=messages,
                 tools=tools,
                 temperature=OPTIMIZED_PARAMS["temperature"],
                 max_tokens=OPTIMIZED_PARAMS["max_tokens"],
-                store=OPTIMIZED_PARAMS["store"],
-                stream=OPTIMIZED_PARAMS["stream"]
+                store=True
             )
             
-            # Extract response text từ Responses API
+            # Extract response text
             if hasattr(response, 'output_text'):
                 response_text = response.output_text
             elif hasattr(response, 'output') and response.output:
-                # Có thể response.output là array của các message objects
                 if isinstance(response.output, list) and len(response.output) > 0:
                     last_output = response.output[-1]
                     if hasattr(last_output, 'content'):
-                        if isinstance(last_output.content, list):
-                            response_text = last_output.content[0].text if last_output.content else "No response"
+                        if isinstance(last_output.content, list) and len(last_output.content) > 0:
+                            response_text = last_output.content[0].text
                         else:
-                            response_text = last_output.content
+                            response_text = str(last_output.content)
                     else:
                         response_text = str(last_output)
                 else:
                     response_text = str(response.output)
             else:
-                response_text = str(response)
+                response_text = "Không thể xử lý phản hồi từ Response API"
             
             return {
                 "success": True,
                 "response": response_text,
-                "response_id": getattr(response, 'id', None),
-                "api_used": "responses"
+                "api_used": "responses",
+                "file_count": file_count
             }
             
         except Exception as responses_error:
-            # Fallback về Chat Completions API nếu Responses API chưa available
-            st.warning(f"⚠️ Responses API chưa khả dụng: {str(responses_error)}")
-            st.info("🔄 Đang fallback về Chat Completions API...")
+            # Fallback to Chat Completions API
+            st.info("🔄 **Fallback**: Sử dụng Chat Completions API...")
             
-            # Convert input messages về format cho Chat Completions
-            chat_messages = input_messages
+            # Prepare tools for Chat Completions
+            chat_tools = None
+            if tools:
+                chat_tools = tools
             
             response = client.chat.completions.create(
                 model=OPTIMIZED_PARAMS["model"],
-                messages=chat_messages,
+                messages=messages,
                 temperature=OPTIMIZED_PARAMS["temperature"],
                 max_tokens=OPTIMIZED_PARAMS["max_tokens"],
-                tools=tools if tools else None,
-                tool_choice="auto" if tools else None
+                tools=chat_tools,
+                tool_choice="auto" if chat_tools else None
             )
             
             response_text = response.choices[0].message.content
@@ -643,15 +575,15 @@ def get_response_with_responses_api(client, question: str, conversation_history:
             return {
                 "success": True,
                 "response": response_text,
-                "response_id": getattr(response, 'id', None),
-                "api_used": "chat_completions"
+                "api_used": "chat_completions",
+                "file_count": file_count,
+                "fallback_reason": str(responses_error)
             }
         
     except Exception as e:
         return {
             "success": False,
             "error": f"Lỗi API: {str(e)}",
-            "response_id": None,
             "api_used": "error"
         }
 
@@ -660,32 +592,25 @@ def get_response_with_responses_api(client, question: str, conversation_history:
 # ===============================
 
 def main():
-    # Initialize database
-    init_database()
-    
     # Initialize session state
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-    if "client" not in st.session_state:
-        st.session_state.client = None
-    if "current_session_id" not in st.session_state:
-        st.session_state.current_session_id = None
-
+    init_session_state()
+    
     # Header
     st.title("⚖️ AI Agent Pháp Chế Khoáng Sản")
-    st.markdown("*Sử dụng **OpenAI Responses API mới nhất (2025)** với fallback sang Chat Completions*")
+    st.markdown("*Tối ưu hóa cho **Streamlit Cloud** với OpenAI Response API + Chat Completions*")
     
     # API Status badge
     st.markdown("""
     <div class="new-api-badge">
-        🚀 NEW: OpenAI Responses API (March 2025) - Faster & More Flexible!
+        🚀 Streamlit Cloud Ready - OpenAI API Integration
     </div>
     """, unsafe_allow_html=True)
     
-    # Auto-initialize client
+    # Initialize client
     if not st.session_state.client:
-        st.session_state.client = init_openai_client()
-            
+        with st.spinner("🔌 Đang kết nối OpenAI API..."):
+            st.session_state.client = init_openai_client()
+    
     # Main layout
     col1, col2 = st.columns([3, 1])
     
@@ -697,171 +622,174 @@ def main():
         if not st.session_state.current_session_id:
             session_id = create_chat_session()
             st.session_state.current_session_id = session_id
+            st.session_state.messages = []
         
-        # Load messages if empty but session exists
-        if not st.session_state.messages and st.session_state.current_session_id:
-            loaded_messages = load_chat_history(st.session_state.current_session_id)
-            st.session_state.messages = loaded_messages
-        
-        # Display chat with custom styling
+        # Display chat
         display_custom_chat(st.session_state.messages)
         
         # Chat input
         if prompt := st.chat_input("Đặt câu hỏi về pháp luật khoáng sản..."):
-            handle_chat_with_responses_api(prompt)
+            handle_chat_input(prompt)
     
     with col2:
         # Control panel
         st.header("🔧 Quản Lý")
         
         # API Status
-        st.subheader("📊 API Status")
-        if st.session_state.client:
-            st.markdown('<div class="status-indicator status-success">🚀 OpenAI Client ✅</div>', unsafe_allow_html=True)
+        st.subheader("📊 Trạng Thái")
+        if st.session_state.api_status["connected"]:
+            st.markdown('<div class="status-indicator status-success">✅ OpenAI Connected</div>', unsafe_allow_html=True)
         else:
-            st.markdown('<div class="status-indicator status-error">🚀 OpenAI Client ❌</div>', unsafe_allow_html=True)
+            st.markdown('<div class="status-indicator status-error">❌ OpenAI Disconnected</div>', unsafe_allow_html=True)
         
         # Config info
         with st.expander("⚙️ Cấu Hình"):
-            has_api_key = bool(
-                (hasattr(st, 'secrets') and "OPENAI_API_KEY" in st.secrets) or
-                "OPENAI_API_KEY" in os.environ
-            )
-            has_files = bool(get_file_ids_from_config())
+            has_api_key = bool(st.secrets.get("OPENAI_API_KEY"))
+            file_ids = st.secrets.get("FILE_IDS", "").split(",") if st.secrets.get("FILE_IDS") else []
+            file_count = len([fid for fid in file_ids if fid.strip()])
             
             st.write("**OPENAI_API_KEY:**", "✅" if has_api_key else "❌")
-            st.write("**FILE_IDS:**", "✅" if has_files else "❌ (Optional)")
+            st.write("**FILE_IDS:**", f"✅ ({file_count} files)" if file_count > 0 else "❌ (Optional)")
             
-            if has_files:
-                st.code(f"Files: {len(get_file_ids_from_config())} files")
-            else:
-                st.info("💡 Để sử dụng file search, thêm FILE_IDS vào Advanced Settings")
+            if not has_api_key:
+                st.error("⚠️ Cần cấu hình OPENAI_API_KEY trong Secrets")
         
         st.divider()
         
-        # Chat Session Management
+        # Session Management
         st.subheader("💬 Chat Sessions")
         
-        # Current session info
-        if st.session_state.current_session_id:
-            st.success(f"🎯 Session hiện tại")
-            if st.button("🆕 Chat Mới"):
-                # Save current session
-                if st.session_state.messages:
-                    for msg in st.session_state.messages:
-                        save_message(st.session_state.current_session_id, msg["role"], msg["content"])
-                
-                # Create new session
-                new_session_id = create_chat_session()
-                st.session_state.current_session_id = new_session_id
-                st.session_state.messages = []
-                st.success("Đã tạo chat mới!")
-                st.rerun()
-        
-        # Chat history
-        with st.expander("📚 Lịch Sử", expanded=True):
-            sessions = get_chat_sessions()
+        if st.button("🆕 Chat Mới", use_container_width=True):
+            # Save current session
+            if st.session_state.current_session_id and st.session_state.messages:
+                for msg in st.session_state.messages:
+                    save_message_to_session(
+                        st.session_state.current_session_id, 
+                        msg["role"], 
+                        msg["content"],
+                        msg.get("metadata")
+                    )
             
-            if sessions:
-                for session in sessions[:5]:  # Show last 5 sessions
-                    session_title = session["title"]
-                    message_count = session["message_count"]
-                    api_type = session.get("api_type", "responses")
+            # Create new session
+            new_session_id = create_chat_session()
+            st.session_state.current_session_id = new_session_id
+            st.session_state.messages = []
+            st.success("✅ Đã tạo chat mới!")
+            st.rerun()
+        
+        # Session list
+        sessions = get_chat_sessions()
+        
+        if sessions:
+            st.write("**📚 Lịch sử chat:**")
+            for i, session in enumerate(sessions[:5]):  # Show last 5 sessions
+                with st.container():
+                    col_a, col_b = st.columns([4, 1])
                     
-                    col_a, col_b = st.columns([3, 1])
                     with col_a:
-                        if st.button(f"💬 {session_title} ({message_count})", key=f"load_{session['session_id']}"):
-                            load_chat_session(session["session_id"])
+                        session_label = f"{session['title']} ({session['message_count']})"
+                        if st.button(
+                            session_label, 
+                            key=f"load_{session['session_id']}", 
+                            use_container_width=True
+                        ):
+                            # Save current session first
+                            if st.session_state.current_session_id and st.session_state.messages:
+                                for msg in st.session_state.messages:
+                                    save_message_to_session(
+                                        st.session_state.current_session_id, 
+                                        msg["role"], 
+                                        msg["content"],
+                                        msg.get("metadata")
+                                    )
+                            
+                            # Load selected session
+                            if load_chat_session(session["session_id"]):
+                                st.success(f"✅ Đã tải: {session['title']}")
+                                st.rerun()
+                    
                     with col_b:
                         if st.button("🗑️", key=f"del_{session['session_id']}"):
                             delete_chat_session(session["session_id"])
-                            st.success("Đã xóa!")
+                            st.success("✅ Đã xóa!")
                             st.rerun()
-            else:
-                st.info("Chưa có chat nào")
+        else:
+            st.info("📝 Chưa có chat nào")
         
         st.divider()
         
-        # API Information
-        st.subheader("📖 API Info")
+        # Deploy Info
+        st.subheader("🚀 Deploy Info")
         
-        with st.expander("🚀 Responses API Features"):
+        with st.expander("📋 Streamlit Cloud Setup"):
             st.markdown("""
-            **✅ Advantages:**
-            - ⚡ Faster response times
-            - 🔍 Better file search integration  
-            - 💾 Stateful conversations
-            - 🌐 Built-in web search (preview)
-            - 🧹 Simplified syntax
-            - 🤖 Computer use capabilities
+            **✅ Required Secrets:**
+            ```toml
+            OPENAI_API_KEY = "sk-your-key-here"
+            ```
             
-            **📋 Current Configuration:**
-            - Model: `gpt-4o` (latest)
-            - Context: 128k tokens
-            - Tools: file_search
-            - Temperature: 0.1 (high accuracy)
-            - Store: True (state management)
+            **📁 Optional Secrets:**
+            ```toml
+            FILE_IDS = "file-abc123,file-def456"
+            ```
+            
+            **📦 Requirements.txt:**
+            ```
+            streamlit>=1.28.0
+            openai>=1.12.0
+            ```
+            
+            **⚡ Features:**
+            - ✅ Session state storage (no database)
+            - ✅ Response API with Chat fallback  
+            - ✅ File search integration
+            - ✅ Streamlit Cloud optimized
             """)
         
-        with st.expander("🔧 Setup Guide"):
+        with st.expander("🔧 Troubleshooting"):
             st.markdown("""
-            **Required:**
-            - `OPENAI_API_KEY` in Advanced Settings
+            **🐛 Common Issues:**
             
-            **Optional:**
-            - `FILE_IDS` for file search (comma-separated)
+            1. **API Key Error:**
+               - Check Secrets configuration
+               - Verify key format (starts with 'sk-')
             
-            **Example FILE_IDS:**
-            ```
-            file-abc123,file-def456,file-ghi789
-            ```
+            2. **Response API Not Available:**
+               - App auto-fallbacks to Chat Completions
+               - No action needed
             
-            **Upload files via API:**
-            ```python
-            file = client.files.create(
-                file=open("law.pdf", "rb"), 
-                purpose='assistants'  # hoặc 'fine-tune'
-            )
-            print(file.id)  # Use this in FILE_IDS
-            ```
+            3. **Session Lost:**
+               - Sessions stored in browser memory
+               - Will reset on page refresh
             
-            **Note:** App sẽ tự động fallback về Chat Completions nếu Responses API chưa available.
+            4. **File Search Not Working:**
+               - Add FILE_IDS to Secrets
+               - Upload files via OpenAI API first
             """)
-        
-        # Parameters display
-        with st.expander("📊 Tham Số"):
-            st.json(OPTIMIZED_PARAMS)
 
-def load_chat_session(session_id):
-    """Load specific chat session"""
-    # Save current session first
-    if st.session_state.current_session_id and st.session_state.messages:
-        for msg in st.session_state.messages:
-            save_message(st.session_state.current_session_id, msg["role"], msg["content"])
-    
-    # Load new session
-    st.session_state.current_session_id = session_id
-    st.session_state.messages = load_chat_history(session_id)
-    st.success(f"Đã tải chat!")
-    st.rerun()
-
-def handle_chat_with_responses_api(prompt):
-    """Handle chat with new Responses API"""
-    # Add user message to session and DB
-    user_message = {"role": "user", "content": prompt, "timestamp": datetime.now().isoformat()}
+def handle_chat_input(prompt):
+    """Handle chat input with proper error handling"""
+    # Add user message
+    user_message = {
+        "role": "user", 
+        "content": prompt, 
+        "timestamp": datetime.now().isoformat()
+    }
     st.session_state.messages.append(user_message)
-    save_message(st.session_state.current_session_id, "user", prompt)
     
-    # Display user message immediately
-    display_custom_chat(st.session_state.messages)
+    # Save to current session
+    if st.session_state.current_session_id:
+        save_message_to_session(
+            st.session_state.current_session_id, 
+            "user", 
+            prompt
+        )
     
-    # Show progress
-    with st.spinner("🤔 AI đang phân tích với Responses API..."):
-        # Get conversation history (exclude current message for API call)
+    # Get AI response
+    with st.spinner("🤔 AI đang phân tích..."):
         conversation_history = [msg for msg in st.session_state.messages[:-1]]
         
-        # Get AI response using Responses API
-        result = get_response_with_responses_api(
+        result = get_ai_response(
             st.session_state.client,
             prompt,
             conversation_history
@@ -869,30 +797,45 @@ def handle_chat_with_responses_api(prompt):
         
         if result["success"]:
             response = result["response"]
-            api_used = result.get("api_used", "unknown")
+            api_used = result["api_used"]
             
-            # Show which API was used
-            if api_used == "chat_completions":
-                st.info("ℹ️ Sử dụng Chat Completions API (fallback)")
-            elif api_used == "responses":
-                st.success("✅ Sử dụng Responses API")
+            # Show API status
+            if api_used == "responses":
+                st.success("✅ Response API")
+            elif api_used == "chat_completions":
+                st.info("ℹ️ Chat Completions API")
             
-            # Add AI response to session and DB
-            ai_message = {"role": "assistant", "content": response, "timestamp": datetime.now().isoformat()}
+            # Add AI response
+            ai_message = {
+                "role": "assistant", 
+                "content": response, 
+                "timestamp": datetime.now().isoformat(),
+                "metadata": {"api_used": api_used}
+            }
             st.session_state.messages.append(ai_message)
-            save_message(st.session_state.current_session_id, "assistant", response, {"api_used": api_used})
             
-            # Refresh display
+            # Save to current session
+            if st.session_state.current_session_id:
+                save_message_to_session(
+                    st.session_state.current_session_id, 
+                    "assistant", 
+                    response,
+                    {"api_used": api_used}
+                )
+            
             st.rerun()
             
         else:
             error_msg = f"❌ {result['error']}"
             st.error(error_msg)
             
-            # Save error message too
-            error_message = {"role": "assistant", "content": error_msg, "timestamp": datetime.now().isoformat()}
+            # Add error message
+            error_message = {
+                "role": "assistant", 
+                "content": error_msg, 
+                "timestamp": datetime.now().isoformat()
+            }
             st.session_state.messages.append(error_message)
-            save_message(st.session_state.current_session_id, "assistant", error_msg)
 
 if __name__ == "__main__":
     main()
