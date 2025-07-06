@@ -62,7 +62,22 @@ if st.sidebar.checkbox("🔍 Debug Mode"):
             # Test Responses API with file search
             if st.sidebar.button("🧪 Test Responses API"):
                 try:
-                    vector_store_ids = get_vector_store_ids()
+                    # INLINE vector store function to avoid "not defined" error
+                    def get_debug_vector_store_ids():
+                        vector_store_ids = []
+                        
+                        # Support both VECTOR_STORE_IDS and VECTOR_STORE_ID
+                        if hasattr(st, 'secrets') and "VECTOR_STORE_IDS" in st.secrets:
+                            ids = st.secrets["VECTOR_STORE_IDS"]
+                            if isinstance(ids, str):
+                                vector_store_ids = [id.strip() for id in ids.split(",") if id.strip()]
+                        elif hasattr(st, 'secrets') and "VECTOR_STORE_ID" in st.secrets:
+                            # Support singular version
+                            vector_store_ids = [st.secrets["VECTOR_STORE_ID"].strip()]
+                        
+                        return vector_store_ids
+                    
+                    vector_store_ids = get_debug_vector_store_ids()
                     
                     params = {
                         "model": "gpt-4o",
@@ -76,6 +91,8 @@ if st.sidebar.checkbox("🔍 Debug Mode"):
                     if vector_store_ids:
                         params["tools"] = [{"type": "file_search", "vector_store_ids": vector_store_ids}]
                         st.sidebar.write(f"🔍 Using vector stores: {vector_store_ids}")
+                    else:
+                        st.sidebar.write("⚠️ No vector stores configured for test")
                     
                     response = client.responses.create(**params)
                     response_text = response.output_text if hasattr(response, 'output_text') else str(response.output)
@@ -92,20 +109,20 @@ if st.sidebar.checkbox("🔍 Debug Mode"):
     else:
         st.sidebar.write("❌ OPENAI_API_KEY not found in secrets")
     
-    # Test Vector Store IDs
+    # Test Vector Store IDs - SUPPORT BOTH FORMATS
     if hasattr(st, 'secrets') and "VECTOR_STORE_IDS" in st.secrets:
         vs_ids = st.secrets["VECTOR_STORE_IDS"]
         st.sidebar.write(f"✅ VECTOR_STORE_IDS found: {vs_ids}")
         
-        # Parse vector store IDs
         if isinstance(vs_ids, str):
             parsed_ids = [id.strip() for id in vs_ids.split(",") if id.strip()]
             st.sidebar.write(f"📋 Parsed IDs: {parsed_ids}")
-        else:
-            st.sidebar.write(f"📋 Raw value: {vs_ids}")
-            
+    elif hasattr(st, 'secrets') and "VECTOR_STORE_ID" in st.secrets:
+        vs_id = st.secrets["VECTOR_STORE_ID"]
+        st.sidebar.write(f"✅ VECTOR_STORE_ID found: {vs_id}")
+        st.sidebar.write(f"📋 Singular format: [{vs_id}]")
     else:
-        st.sidebar.write("❌ VECTOR_STORE_IDS not found in secrets")
+        st.sidebar.write("❌ Neither VECTOR_STORE_IDS nor VECTOR_STORE_ID found")
         
     st.sidebar.write("---")
 # ==> END DEBUG CODE <===
@@ -345,10 +362,10 @@ def init_openai_client():
 # ===============================
 
 def get_vector_store_ids():
-    """Get vector store IDs from configuration"""
+    """Get vector store IDs from configuration - SUPPORT BOTH FORMATS"""
     vector_store_ids = []
     
-    # From Streamlit secrets
+    # From Streamlit secrets - PLURAL format
     if hasattr(st, 'secrets') and "VECTOR_STORE_IDS" in st.secrets:
         ids = st.secrets["VECTOR_STORE_IDS"]
         if isinstance(ids, str):
@@ -356,10 +373,18 @@ def get_vector_store_ids():
         elif isinstance(ids, list):
             vector_store_ids = ids
     
-    # From environment variables  
+    # From Streamlit secrets - SINGULAR format (support user's current config)
+    elif hasattr(st, 'secrets') and "VECTOR_STORE_ID" in st.secrets:
+        vector_store_ids = [st.secrets["VECTOR_STORE_ID"].strip()]
+    
+    # From environment variables - PLURAL
     elif "VECTOR_STORE_IDS" in os.environ:
         ids = os.environ["VECTOR_STORE_IDS"]
         vector_store_ids = [id.strip() for id in ids.split(",") if id.strip()]
+    
+    # From environment variables - SINGULAR  
+    elif "VECTOR_STORE_ID" in os.environ:
+        vector_store_ids = [os.environ["VECTOR_STORE_ID"].strip()]
     
     return vector_store_ids
 
@@ -462,12 +487,19 @@ def main():
             else:
                 st.error("❌ Not configured")
                 
-            st.write("**VECTOR_STORE_IDS:**")
+            st.write("**VECTOR STORE IDs:**")
             vector_store_ids = get_vector_store_ids()
             if vector_store_ids:
                 st.success(f"✅ Configured: {len(vector_store_ids)} stores")
                 for i, vs_id in enumerate(vector_store_ids):
                     st.code(f"{i+1}. {vs_id}")
+                    
+                # Show which config key was used
+                if hasattr(st, 'secrets') and "VECTOR_STORE_IDS" in st.secrets:
+                    st.info("📋 Using: VECTOR_STORE_IDS (plural)")
+                elif hasattr(st, 'secrets') and "VECTOR_STORE_ID" in st.secrets:
+                    st.info("📋 Using: VECTOR_STORE_ID (singular)")
+                    
             else:
                 st.error("❌ Not configured")
                 st.info("""
@@ -476,8 +508,9 @@ def main():
                 2. Thêm (KHÔNG dùng [secrets]):
                 ```
                 OPENAI_API_KEY = "sk-proj-your-api-key"
-                VECTOR_STORE_IDS = "vs_68695626c77881918a6b72f1b9bdd4c9"
+                VECTOR_STORE_ID = "vs_68695626c77881918a6b72f1b9bdd4c9"
                 ```
+                (hoặc VECTOR_STORE_IDS cho nhiều stores)
                 3. Save → Restart app
                 """)
             
