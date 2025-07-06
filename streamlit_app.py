@@ -1,5 +1,5 @@
-import streamlit as st
 from openai import OpenAI
+import streamlit as st
 import time
 from datetime import datetime
 
@@ -19,11 +19,12 @@ st.title("⚖️ AI Pháp chế Khoáng sản")
 if OPENAI_API_KEY and ASSISTANT_ID:
     client = OpenAI(api_key=OPENAI_API_KEY)
 
-    # Session state for chat history
     if "chat_history" not in st.session_state:
         st.session_state["chat_history"] = []
+    if "thread_id" not in st.session_state:
+        thread = client.threads.create()
+        st.session_state["thread_id"] = thread.id
 
-    # Hiển thị lịch sử chat bong bóng
     st.markdown('<div style="height:400px;overflow-y:auto;border:1px solid #ddd;padding:8px 0;background:#f9f9f9">', unsafe_allow_html=True)
     for item in st.session_state["chat_history"]:
         who, content, timestamp = item["role"], item["content"], item["time"]
@@ -43,41 +44,43 @@ if OPENAI_API_KEY and ASSISTANT_ID:
                 </div>""", unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # Form nhập câu hỏi
     with st.form(key="qa_form", clear_on_submit=True):
         user_input = st.text_area("Nhập câu hỏi pháp luật:", placeholder="Khi nào bị thu hồi giấy phép khai thác khoáng sản?", height=80)
         submitted = st.form_submit_button("Gửi")
 
     if submitted and user_input.strip():
-        # Lưu chat user
         st.session_state["chat_history"].append({
             "role": "user",
             "content": user_input,
             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         })
 
-        # Gọi Responses API (chuẩn mới nhất!)
         with st.spinner("AI pháp chế đang xử lý..."):
-            response_obj = client.responses.create(
-                assistant_id=ASSISTANT_ID,
-                input=user_input
+            client.threads.messages.create(
+                thread_id=st.session_state["thread_id"],
+                role="user",
+                content=user_input
             )
-            response_id = response_obj.id
-
-            # Polling để lấy kết quả (vì trả lời có thể cần thời gian)
+            run = client.threads.runs.create(
+                thread_id=st.session_state["thread_id"],
+                assistant_id=ASSISTANT_ID
+            )
             while True:
-                res = client.responses.retrieve(response_id=response_id)
-                if res.status == "completed":
+                run_status = client.threads.runs.retrieve(
+                    thread_id=st.session_state["thread_id"],
+                    run_id=run.id
+                )
+                if run_status.status == "completed":
                     break
-                elif res.status in ["failed", "cancelled"]:
+                elif run_status.status in ["failed", "cancelled"]:
                     st.error("Có lỗi khi xử lý câu hỏi.")
                     break
-                time.sleep(1.0)
-
-            answer = res.output.text if hasattr(res.output, "text") else "Không có trả lời từ AI."
+                time.sleep(1)
+            messages = client.threads.messages.list(thread_id=st.session_state["thread_id"])
+            ai_answer = messages.data[-1].content[0].text.value if messages.data else "Không có trả lời từ AI."
             st.session_state["chat_history"].append({
                 "role": "assistant",
-                "content": answer,
+                "content": ai_answer,
                 "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             })
         st.rerun()
@@ -85,4 +88,4 @@ if OPENAI_API_KEY and ASSISTANT_ID:
 else:
     st.warning("Vui lòng nhập OpenAI API Key và Assistant ID để sử dụng hệ thống.")
 
-st.caption("© 2025 - Hệ thống AI pháp chế khoáng sản. Dùng Responses API chuẩn.")
+st.caption("© 2025 - Hệ thống AI pháp chế khoáng sản.")
