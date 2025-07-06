@@ -103,9 +103,7 @@ def get_ai_response(client, question: str, conversation_history: List[Dict]) -> 
             params = {
                 "model": "gpt-4o",
                 "input": messages,
-                "temperature": 0.1,
-                "max_completion_tokens": 1000,
-                "store": True
+                "store": True  # Chỉ giữ lại tham số hợp lệ
             }
             if vector_store_ids:
                 params["tools"] = [{"type": "file_search", "vector_store_ids": vector_store_ids}]
