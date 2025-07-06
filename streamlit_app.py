@@ -1,117 +1,1002 @@
 import streamlit as st
-import openai
-import sqlite3
 import time
+import json
+import os
 from datetime import datetime
+import tempfile
+from typing import List, Dict, Any
+import sqlite3
+import uuid
 
-# === Cấu hình hệ thống ===
-st.set_page_config(page_title="AI Pháp chế Khoáng sản", page_icon="⚖️", layout="wide")
-openai.api_key = st.secrets["OPENAI_API_KEY"] if "OPENAI_API_KEY" in st.secrets else st.text_input("Nhập OpenAI API Key:", type="password")
-ASSISTANT_ID = st.secrets["ASSISTANT_ID"] if "ASSISTANT_ID" in st.secrets else st.text_input("Nhập Assistant ID:", type="password")
+# Import với error handling
+try:
+    import openai
+except ImportError:
+    st.error("Lỗi: Không thể import OpenAI. Vui lòng kiểm tra requirements.txt")
+    st.stop()
 
-# === Kết nối & tạo database nếu chưa có ===
-def init_db():
+try:
+    import PyPDF2
+except ImportError:
+    st.error("Lỗi: Không thể import PyPDF2. Vui lòng cài đặt: pip install PyPDF2==3.0.1")
+    st.stop()
+
+try:
+    import docx
+except ImportError:
+    st.error("Lỗi: Không thể import python-docx. Vui lòng cài đặt: pip install python-docx==1.1.0")
+    st.stop()
+
+# ===============================
+# CONFIGURATION & SETUP  
+# ===============================
+
+# Page config
+try:
+    st.set_page_config(
+        page_title="AI Agent Pháp Chế Khoáng Sản",
+        page_icon="⚖️",
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
+except Exception as e:
+    st.error(f"Lỗi cấu hình trang: {e}")
+
+# Custom CSS cho giao diện chat đẹp
+st.markdown("""
+<style>
+/* Hide Streamlit default elements */
+#MainMenu {visibility: hidden;}
+footer {visibility: hidden;}
+header {visibility: hidden;}
+
+/* Chat Container */
+.chat-container {
+    max-width: 100%;
+    margin: 0 auto;
+    padding: 20px 0;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+}
+
+/* User Message (Left) */
+.user-message {
+    display: flex;
+    justify-content: flex-start;
+    margin: 15px 0;
+    animation: slideInLeft 0.3s ease-out;
+}
+
+.user-bubble {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    padding: 15px 20px;
+    border-radius: 20px 20px 20px 5px;
+    max-width: 70%;
+    word-wrap: break-word;
+    box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
+    position: relative;
+    line-height: 1.4;
+}
+
+.user-bubble::before {
+    content: "👤";
+    position: absolute;
+    left: -35px;
+    top: 5px;
+    font-size: 24px;
+}
+
+/* AI Message (Right) */
+.ai-message {
+    display: flex;
+    justify-content: flex-end;
+    margin: 15px 0;
+    animation: slideInRight 0.3s ease-out;
+}
+
+.ai-bubble {
+    background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+    color: white;
+    padding: 15px 20px;
+    border-radius: 20px 20px 5px 20px;
+    max-width: 70%;
+    word-wrap: break-word;
+    box-shadow: 0 4px 12px rgba(240, 147, 251, 0.3);
+    position: relative;
+    line-height: 1.4;
+}
+
+.ai-bubble::after {
+    content: "⚖️";
+    position: absolute;
+    right: -35px;
+    top: 5px;
+    font-size: 24px;
+}
+
+/* Animations */
+@keyframes slideInLeft {
+    from {
+        opacity: 0;
+        transform: translateX(-50px);
+    }
+    to {
+        opacity: 1;
+        transform: translateX(0);
+    }
+}
+
+@keyframes slideInRight {
+    from {
+        opacity: 0;
+        transform: translateX(50px);
+    }
+    to {
+        opacity: 1;
+        transform: translateX(0);
+    }
+}
+
+/* Chat Info */
+.chat-info {
+    text-align: center;
+    color: #666;
+    font-size: 12px;
+    margin: 5px 0;
+}
+
+/* Typing Indicator */
+.typing-indicator {
+    display: flex;
+    justify-content: flex-end;
+    margin: 10px 0;
+}
+
+.typing-dots {
+    background: #f0f0f0;
+    padding: 15px 20px;
+    border-radius: 20px 20px 5px 20px;
+    max-width: 70px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.typing-dots span {
+    height: 8px;
+    width: 8px;
+    background: #999;
+    border-radius: 50%;
+    display: inline-block;
+    margin: 0 2px;
+    animation: typing 1.4s infinite ease-in-out;
+}
+
+.typing-dots span:nth-child(1) { animation-delay: -0.32s; }
+.typing-dots span:nth-child(2) { animation-delay: -0.16s; }
+
+@keyframes typing {
+    0%, 80%, 100% { 
+        transform: scale(0.8);
+        opacity: 0.5;
+    }
+    40% { 
+        transform: scale(1);
+        opacity: 1;
+    }
+}
+
+/* Welcome Message */
+.welcome-message {
+    text-align: center;
+    padding: 40px 20px;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    border-radius: 20px;
+    color: white;
+    margin: 20px 0;
+}
+
+/* Button Styling */
+.stButton > button {
+    border-radius: 20px;
+    border: none;
+    background: linear-gradient(45deg, #667eea, #764ba2);
+    color: white;
+    transition: all 0.3s ease;
+    font-weight: 500;
+}
+
+.stButton > button:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 12px rgba(102, 126, 234, 0.3);
+}
+
+/* Sidebar styling */
+.css-1d391kg {
+    background: linear-gradient(180deg, #f8f9fa 0%, #e9ecef 100%);
+}
+
+/* Status indicators */
+.status-indicator {
+    padding: 5px 10px;
+    border-radius: 15px;
+    font-size: 12px;
+    font-weight: bold;
+    text-align: center;
+}
+
+.status-success {
+    background: #d4edda;
+    color: #155724;
+}
+
+.status-warning {
+    background: #fff3cd;
+    color: #856404;
+}
+
+.status-error {
+    background: #f8d7da;
+    color: #721c24;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# Optimized parameters
+OPTIMIZED_PARAMS = {
+    "chunk_size": 1000,
+    "chunk_overlap": 200,
+    "temperature": 0.1,
+    "max_tokens": 4000,
+    "top_p": 0.95,
+}
+
+# Enhanced system prompt
+SYSTEM_PROMPT = """
+Bạn là AI Agent chuyên về pháp luật khoáng sản Việt Nam với độ chính xác cao nhất.
+
+NGUYÊN TẮC HOẠT ĐỘNG:
+1. **Độ chính xác tuyệt đối**: Chỉ trả lời dựa trên văn bản pháp luật có trong tài liệu
+2. **Xử lý thay đổi pháp luật**: Luôn kiểm tra và cảnh báo về:
+   - Văn bản đã bị sửa đổi, bổ sung
+   - Văn bản đã bị thay thế hoàn toàn
+   - Văn bản đã hết hiệu lực
+   - Quy định có thể bị mâu thuẫn giữa các văn bản
+
+3. **Cấu trúc trả lời bắt buộc**:
+   ```
+   📋 **THÔNG TIN PHÁP LÝ**
+   - Căn cứ pháp lý: [Tên văn bản, điều khoản cụ thể]
+   - Trạng thái hiệu lực: [Còn hiệu lực/Đã sửa đổi/Đã hết hiệu lực]
+   - Ngày ban hành/sửa đổi: [DD/MM/YYYY]
+
+   💡 **NỘI DUNG GIẢI ĐÁP**
+   [Trả lời chi tiết, chính xác]
+
+   ⚠️ **CẢNH BÁO QUAN TRỌNG**
+   [Nếu có vấn đề về hiệu lực, thay đổi, hoặc mâu thuẫn]
+
+   🔍 **GỢI Ý KIỂM TRA THÊM**
+   [Văn bản liên quan cần xem xét]
+   ```
+
+TUYỆT ĐỐI KHÔNG ĐƯỢC:
+- Đưa ra lời khuyên pháp lý mà không có căn cứ
+- Diễn giải rộng hoặc suy đoán nội dung
+- Bỏ qua việc cảnh báo về thay đổi pháp luật
+- Trả lời khi không chắc chắn về thông tin
+"""
+
+# ===============================
+# DATABASE FUNCTIONS
+# ===============================
+
+def init_database():
+    """Initialize SQLite database for chat history"""
     conn = sqlite3.connect('chat_history.db')
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS chat (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            thread_id TEXT,
-            role TEXT,
-            content TEXT,
-            timestamp TEXT
-        )
+    cursor = conn.cursor()
+    
+    # Create tables
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS chat_sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT UNIQUE NOT NULL,
+        assistant_id TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        title TEXT,
+        thread_id TEXT
+    )
     ''')
-    conn.commit()
-    return conn
-
-# === Hàm lưu chat vào DB ===
-def save_chat(thread_id, role, content):
-    conn = init_db()
-    c = conn.cursor()
-    c.execute("INSERT INTO chat (thread_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
-              (thread_id, role, content, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS chat_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        metadata TEXT,
+        FOREIGN KEY (session_id) REFERENCES chat_sessions (session_id)
+    )
+    ''')
+    
+    # Create indexes for performance
+    cursor.execute('''
+    CREATE INDEX IF NOT EXISTS idx_session_last_activity 
+    ON chat_sessions(last_activity)
+    ''')
+    
+    cursor.execute('''
+    CREATE INDEX IF NOT EXISTS idx_messages_session_time 
+    ON chat_messages(session_id, timestamp)
+    ''')
+    
     conn.commit()
     conn.close()
 
-# === Hàm load chat từ DB theo thread_id ===
-def load_chat(thread_id):
-    conn = init_db()
-    c = conn.cursor()
-    c.execute("SELECT role, content, timestamp FROM chat WHERE thread_id = ? ORDER BY id ASC", (thread_id,))
-    rows = c.fetchall()
+def create_chat_session(assistant_id=None):
+    """Create new chat session"""
+    session_id = str(uuid.uuid4())
+    conn = sqlite3.connect('chat_history.db')
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+    INSERT INTO chat_sessions (session_id, assistant_id, title)
+    VALUES (?, ?, ?)
+    ''', (session_id, assistant_id, f"Chat {datetime.now().strftime('%H:%M %d/%m')}"))
+    
+    conn.commit()
     conn.close()
-    return rows
+    
+    return session_id
 
-st.title("⚖️ AI Pháp chế Khoáng sản - Q&A Legal Agent")
+def save_message(session_id, role, content, metadata=None):
+    """Save message to database"""
+    conn = sqlite3.connect('chat_history.db')
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+    INSERT INTO chat_messages (session_id, role, content, metadata)
+    VALUES (?, ?, ?, ?)
+    ''', (session_id, role, content, json.dumps(metadata) if metadata else None))
+    
+    # Update last activity
+    cursor.execute('''
+    UPDATE chat_sessions 
+    SET last_activity = CURRENT_TIMESTAMP 
+    WHERE session_id = ?
+    ''', (session_id,))
+    
+    conn.commit()
+    conn.close()
 
-if openai.api_key and ASSISTANT_ID:
-    if "thread_id" not in st.session_state:
-        thread = openai.beta.threads.create()
-        st.session_state["thread_id"] = thread.id
+def load_chat_history(session_id):
+    """Load chat history from database"""
+    conn = sqlite3.connect('chat_history.db')
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+    SELECT role, content, timestamp, metadata
+    FROM chat_messages 
+    WHERE session_id = ?
+    ORDER BY timestamp ASC
+    ''', (session_id,))
+    
+    messages = []
+    for row in cursor.fetchall():
+        role, content, timestamp, metadata = row
+        messages.append({
+            "role": role,
+            "content": content,
+            "timestamp": timestamp,
+            "metadata": json.loads(metadata) if metadata else None
+        })
+    
+    conn.close()
+    return messages
 
-    thread_id = st.session_state["thread_id"]
+def get_chat_sessions():
+    """Get all chat sessions"""
+    conn = sqlite3.connect('chat_history.db')
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+    SELECT session_id, title, created_at, last_activity, assistant_id,
+           (SELECT COUNT(*) FROM chat_messages WHERE session_id = cs.session_id) as message_count
+    FROM chat_sessions cs
+    ORDER BY last_activity DESC
+    ''')
+    
+    sessions = []
+    for row in cursor.fetchall():
+        sessions.append({
+            "session_id": row[0],
+            "title": row[1],
+            "created_at": row[2],
+            "last_activity": row[3],
+            "assistant_id": row[4],
+            "message_count": row[5]
+        })
+    
+    conn.close()
+    return sessions
 
-    # ============ Hiển thị lịch sử chat dạng bong bóng ============
-    chat_history = load_chat(thread_id)
-    st.markdown('<div style="height:400px;overflow-y:scroll;border:1px solid #ddd;padding:8px 0 8px 0;background:#f9f9f9">', unsafe_allow_html=True)
-    for role, content, timestamp in chat_history:
-        if role == "user":
-            st.markdown(
-                f"""
-                <div style="display:flex;align-items:flex-start;">
-                    <div style="background:#e5eaff;padding:12px 18px;border-radius:18px 18px 18px 4px;max-width:70%;margin-bottom:4px;">
-                        <b>Bạn</b> <span style="color:#888;font-size:11px;">{timestamp}</span><br>{content}
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
+def update_session_thread_id(session_id, thread_id):
+    """Update thread ID for session"""
+    conn = sqlite3.connect('chat_history.db')
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+    UPDATE chat_sessions 
+    SET thread_id = ? 
+    WHERE session_id = ?
+    ''', (thread_id, session_id))
+    
+    conn.commit()
+    conn.close()
+
+def delete_chat_session(session_id):
+    """Delete chat session and all messages"""
+    conn = sqlite3.connect('chat_history.db')
+    cursor = conn.cursor()
+    
+    cursor.execute('DELETE FROM chat_messages WHERE session_id = ?', (session_id,))
+    cursor.execute('DELETE FROM chat_sessions WHERE session_id = ?', (session_id,))
+    
+    conn.commit()
+    conn.close()
+
+# ===============================
+# CUSTOM CHAT DISPLAY FUNCTIONS
+# ===============================
+
+def display_custom_chat(messages):
+    """Display chat messages with custom styling"""
+    if not messages:
+        st.markdown("""
+        <div class="welcome-message">
+            <h3>💬 Chào mừng đến với AI Agent Pháp Chế Khoáng Sản!</h3>
+            <p>Đặt câu hỏi bên dưới để bắt đầu cuộc trò chuyện</p>
+        </div>
+        """, unsafe_allow_html=True)
+        return
+    
+    chat_html = '<div class="chat-container">'
+    
+    for i, message in enumerate(messages):
+        timestamp = message.get("timestamp", "")
+        if timestamp:
+            # Parse timestamp if it's a string
+            if isinstance(timestamp, str):
+                try:
+                    if 'T' in timestamp:
+                        dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                    else:
+                        dt = datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S')
+                    time_str = dt.strftime('%H:%M')
+                except:
+                    time_str = timestamp.split(' ')[1][:5] if ' ' in timestamp else ""
+            else:
+                time_str = ""
         else:
-            st.markdown(
-                f"""
-                <div style="display:flex;justify-content:flex-end;">
-                    <div style="background:#fffbe0;padding:12px 18px;border-radius:18px 18px 4px 18px;max-width:70%;margin-bottom:4px;">
-                        <b>AI</b> <span style="color:#888;font-size:11px;">{timestamp}</span><br>{content}
-                    </div>
+            time_str = ""
+        
+        # Escape HTML in content
+        content = message["content"].replace('<', '&lt;').replace('>', '&gt;')
+        # Convert markdown bold to HTML
+        content = content.replace('**', '<strong>').replace('**', '</strong>')
+        # Convert newlines to <br>
+        content = content.replace('\n', '<br>')
+        
+        if message["role"] == "user":
+            chat_html += f'''
+            <div class="user-message">
+                <div class="user-bubble">
+                    {content}
                 </div>
-                """, unsafe_allow_html=True)
-    st.markdown('</div>', unsafe_allow_html=True)
+            </div>
+            {f'<div class="chat-info">👤 Bạn • {time_str}</div>' if time_str else '<div class="chat-info">👤 Bạn</div>'}
+            '''
+        else:  # assistant
+            chat_html += f'''
+            <div class="ai-message">
+                <div class="ai-bubble">
+                    {content}
+                </div>
+            </div>
+            {f'<div class="chat-info">⚖️ AI Agent • {time_str}</div>' if time_str else '<div class="chat-info">⚖️ AI Agent</div>'}
+            '''
+    
+    chat_html += '</div>'
+    st.markdown(chat_html, unsafe_allow_html=True)
 
-    # ============ Form nhập câu hỏi ============
-    with st.form(key="qa_form", clear_on_submit=True):
-        user_input = st.text_area("Nhập câu hỏi pháp luật:", placeholder="Khi nào bị thu hồi giấy phép khai thác khoáng sản?", height=80)
-        submitted = st.form_submit_button("Gửi")
+def show_typing_indicator():
+    """Show typing indicator"""
+    typing_html = '''
+    <div class="typing-indicator">
+        <div class="typing-dots">
+            <span></span>
+            <span></span>
+            <span></span>
+        </div>
+    </div>
+    '''
+    return st.markdown(typing_html, unsafe_allow_html=True)
 
-    if submitted and user_input.strip():
-        # Hiện ngay lên giao diện
-        save_chat(thread_id, "user", user_input)
-        st.experimental_rerun()  # Để hiển thị ngay bong bóng mới
+# ===============================
+# HELPER FUNCTIONS
+# ===============================
 
-        # Gửi lên Assistant API
-        openai.beta.threads.messages.create(
+@st.cache_data
+def init_openai_client():
+    """Initialize OpenAI client with error handling"""
+    try:
+        # Thử lấy API key từ nhiều nguồn
+        api_key = None
+        
+        # 1. Từ Streamlit secrets
+        if hasattr(st, 'secrets') and "OPENAI_API_KEY" in st.secrets:
+            api_key = st.secrets["OPENAI_API_KEY"]
+        
+        # 2. Từ environment variables
+        elif "OPENAI_API_KEY" in os.environ:
+            api_key = os.environ["OPENAI_API_KEY"]
+        
+        if not api_key:
+            st.error("⚠️ Chưa cấu hình OPENAI_API_KEY")
+            st.info("Vui lòng thêm API key vào Streamlit secrets hoặc environment variables")
+            st.stop()
+            
+        # Validate API key format
+        if not api_key.startswith('sk-'):
+            st.error("⚠️ API key không đúng định dạng. Phải bắt đầu bằng 'sk-'")
+            st.stop()
+            
+        client = openai.OpenAI(api_key=api_key)
+        
+        # Test connection
+        try:
+            client.models.list()
+            return client
+        except Exception as e:
+            st.error(f"⚠️ Không thể kết nối đến OpenAI: {str(e)}")
+            st.stop()
+            
+    except Exception as e:
+        st.error(f"⚠️ Lỗi khởi tạo OpenAI client: {str(e)}")
+        st.stop()
+
+def get_assistant_id_from_config():
+    """Get Assistant ID from config sources"""
+    # 1. Từ Streamlit secrets
+    if hasattr(st, 'secrets') and "ASSISTANT_ID" in st.secrets:
+        return st.secrets["ASSISTANT_ID"]
+    
+    # 2. Từ environment variables  
+    elif "ASSISTANT_ID" in os.environ:
+        return os.environ["ASSISTANT_ID"]
+    
+    return None
+
+def auto_connect_assistant():
+    """Tự động kết nối Assistant nếu có config sẵn"""
+    assistant_id = get_assistant_id_from_config()
+    
+    if assistant_id and not st.session_state.assistant_id:
+        try:
+            # Verify assistant exists
+            assistant = st.session_state.client.beta.assistants.retrieve(assistant_id)
+            
+            # Store in session state
+            st.session_state.assistant_id = assistant_id
+            st.session_state.assistant_info = {
+                "name": assistant.name,
+                "id": assistant_id,
+                "created_at": assistant.created_at,
+                "model": assistant.model,
+                "auto_connected": True
+            }
+            
+            return True
+            
+        except Exception as e:
+            st.error(f"❌ Lỗi tự động kết nối Assistant {assistant_id}: {str(e)}")
+            return False
+    
+    return False
+
+def connect_existing_assistant(assistant_id):
+    """Connect to existing assistant"""
+    with st.spinner("🔄 Đang kết nối với Assistant..."):
+        try:
+            # Verify assistant exists and get info
+            assistant = st.session_state.client.beta.assistants.retrieve(assistant_id)
+            
+            # Store in session state
+            st.session_state.assistant_id = assistant_id
+            st.session_state.assistant_info = {
+                "name": assistant.name,
+                "id": assistant_id,
+                "created_at": assistant.created_at,
+                "model": assistant.model,
+                "auto_connected": False
+            }
+            
+            st.success(f"✅ Kết nối thành công với Assistant: {assistant.name}")
+            st.info(f"🆔 ID: `{assistant_id}`")
+            st.info(f"🤖 Model: {assistant.model}")
+            st.rerun()
+            
+        except Exception as e:
+            st.error(f"❌ Lỗi kết nối Assistant: {str(e)}")
+            st.error("Kiểm tra lại Assistant ID hoặc quyền truy cập API")
+
+def get_response_safe(client, assistant_id: str, question: str, thread_id: str = None) -> Dict[str, Any]:
+    """Get assistant response with comprehensive error handling"""
+    try:
+        # Create or use existing thread
+        if not thread_id:
+            thread = client.beta.threads.create()
+            thread_id = thread.id
+        
+        # Add message
+        client.beta.threads.messages.create(
             thread_id=thread_id,
             role="user",
-            content=user_input
+            content=question
         )
-        run = openai.beta.threads.runs.create(
+        
+        # Create run with timeout handling
+        run = client.beta.threads.runs.create(
             thread_id=thread_id,
-            assistant_id=ASSISTANT_ID,
-            temperature=0.1,
-            max_tokens=800
+            assistant_id=assistant_id,
+            temperature=OPTIMIZED_PARAMS["temperature"],
+            max_tokens=OPTIMIZED_PARAMS["max_tokens"]
         )
-        status = "in_progress"
-        with st.spinner("AI pháp chế đang xử lý..."):
-            while status not in ["completed", "failed", "cancelled"]:
-                run_status = openai.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
-                status = run_status.status
-                time.sleep(1.0)
-        # Lấy câu trả lời cuối cùng
-        messages = openai.beta.threads.messages.list(thread_id=thread_id)
-        ai_answer = messages.data[0].content[0].text.value if messages.data else "Không có trả lời từ AI."
-        save_chat(thread_id, "assistant", ai_answer)
-        st.experimental_rerun()  # Hiển thị luôn trả lời AI
+        
+        # Wait for completion with timeout
+        max_wait = 60  # seconds
+        wait_time = 0
+        
+        while run.status in ['queued', 'in_progress'] and wait_time < max_wait:
+            time.sleep(2)
+            wait_time += 2
+            run = client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
+        
+        if wait_time >= max_wait:
+            return {
+                "success": False,
+                "error": "Timeout: Quá thời gian chờ phản hồi",
+                "thread_id": thread_id
+            }
+        
+        if run.status == 'completed':
+            messages = client.beta.threads.messages.list(thread_id=thread_id)
+            response = messages.data[0].content[0].text.value
+            return {
+                "success": True,
+                "response": response,
+                "thread_id": thread_id
+            }
+        else:
+            return {
+                "success": False,
+                "error": f"Lỗi xử lý: {run.status}",
+                "thread_id": thread_id
+            }
+            
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Lỗi hệ thống: {str(e)}",
+            "thread_id": thread_id
+        }
 
-else:
-    st.warning("Vui lòng nhập OpenAI API Key và Assistant ID để sử dụng hệ thống.")
+# ===============================
+# MAIN APPLICATION
+# ===============================
 
-st.caption("© 2025 - Hệ thống AI pháp chế khoáng sản. Thiết kế bởi bạn và ChatGPT.")
+def main():
+    # Initialize database
+    init_database()
+    
+    # Initialize session state
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+    if "assistant_id" not in st.session_state:
+        st.session_state.assistant_id = None
+    if "client" not in st.session_state:
+        st.session_state.client = None
+    if "thread_id" not in st.session_state:
+        st.session_state.thread_id = None
+    if "current_session_id" not in st.session_state:
+        st.session_state.current_session_id = None
 
+    # Header
+    st.title("⚖️ AI Agent Pháp Chế Khoáng Sản")
+    st.markdown("*Hệ thống AI hỗ trợ tra cứu và tư vấn pháp luật khoáng sản với độ chính xác cao*")
+    
+    # Auto-initialize client and assistant
+    if not st.session_state.client:
+        st.session_state.client = init_openai_client()
+    
+    # Auto-connect assistant if configured
+    if st.session_state.client and not st.session_state.assistant_id:
+        if auto_connect_assistant():
+            st.success("🚀 Đã tự động kết nối Assistant từ cấu hình!")
+            
+    # Main layout
+    col1, col2 = st.columns([3, 1])
+    
+    with col1:
+        # Main chat area
+        if st.session_state.assistant_id:
+            # Chat header
+            st.header("💬 Tư Vấn Pháp Luật")
+            
+            # Create session if not exists
+            if not st.session_state.current_session_id:
+                session_id = create_chat_session(st.session_state.assistant_id)
+                st.session_state.current_session_id = session_id
+            
+            # Load messages if empty but session exists
+            if not st.session_state.messages and st.session_state.current_session_id:
+                loaded_messages = load_chat_history(st.session_state.current_session_id)
+                st.session_state.messages = loaded_messages
+            
+            # Display chat with custom styling
+            display_custom_chat(st.session_state.messages)
+            
+            # Chat input
+            if prompt := st.chat_input("Đặt câu hỏi về pháp luật khoáng sản..."):
+                handle_chat_with_db(prompt)
+        
+        else:
+            # No assistant connected
+            st.header("💬 Tư Vấn Pháp Luật")
+            st.info("👉 Vui lòng kết nối Assistant trong panel bên phải để bắt đầu chat")
+            
+            # Quick start guide
+            with st.expander("🚀 Hướng Dẫn Nhanh"):
+                st.markdown("""
+                **Cách 1: Auto-connect (Khuyên dùng)**
+                1. Set `ASSISTANT_ID` trong Streamlit Advanced Settings
+                2. App sẽ tự động kết nối khi mở
+                3. Chat luôn không cần làm gì!
+                
+                **Cách 2: Manual connect**
+                1. Lấy Assistant ID từ OpenAI (asst_xxxxxxxxxx)
+                2. Nhập vào panel bên phải và click "Kết nối"
+                3. Bắt đầu chat ngay!
+                
+                **💡 Features:**
+                - 👤 User tin nhắn bên trái (xanh)
+                - ⚖️ AI tin nhắn bên phải (hồng)
+                - 💾 Chat history tự động lưu
+                - 🔄 Có thể tạo nhiều cuộc chat
+                """)
+            
+            # Example questions
+            st.subheader("🤔 Câu Hỏi Mẫu")
+            example_questions = [
+                "Quy trình cấp phép thăm dò khoáng sản như thế nào?",
+                "Thuế tài nguyên khoáng sản được tính như thế nào?",
+                "Điều kiện để được cấp giấy phép khai thác khoáng sản?",
+                "Xử phạt vi phạm trong lĩnh vực khoáng sản có mức nào?",
+                "Quyền và nghĩa vụ của tổ chức khai thác khoáng sản?"
+            ]
+            
+            for i, question in enumerate(example_questions):
+                if st.button(f"❓ {question}", key=f"example_{i}"):
+                    st.info("Vui lòng kết nối Assistant trước để đặt câu hỏi này")
+    
+    with col2:
+        # Control panel
+        st.header("🔧 Cấu Hình & Quản Lý")
+        
+        # Connection status display
+        st.subheader("📊 Trạng Thái Kết Nối")
+        status_col1, status_col2 = st.columns(2)
+        with status_col1:
+            if st.session_state.client:
+                st.markdown('<div class="status-indicator status-success">🔌 OpenAI ✅</div>', unsafe_allow_html=True)
+            else:
+                st.markdown('<div class="status-indicator status-error">🔌 OpenAI ❌</div>', unsafe_allow_html=True)
+                
+        with status_col2:
+            if st.session_state.assistant_id:
+                st.markdown('<div class="status-indicator status-success">🤖 Assistant ✅</div>', unsafe_allow_html=True)
+            else:
+                st.markdown('<div class="status-indicator status-warning">🤖 Assistant ⏳</div>', unsafe_allow_html=True)
+        
+        # Manual connection button
+        if st.button("🔄 Refresh Connection"):
+            st.session_state.client = init_openai_client()
+            auto_connect_assistant()
+            st.rerun()
+        
+        # Config info
+        with st.expander("⚙️ Cấu Hình Hiện Tại"):
+            has_api_key = bool(get_assistant_id_from_config() or 
+                              (hasattr(st, 'secrets') and "OPENAI_API_KEY" in st.secrets) or
+                              "OPENAI_API_KEY" in os.environ)
+            has_assistant_id = bool(get_assistant_id_from_config())
+            
+            st.write("**OPENAI_API_KEY:**", "✅ Configured" if has_api_key else "❌ Missing")
+            st.write("**ASSISTANT_ID:**", "✅ Configured" if has_assistant_id else "❌ Missing")
+            
+            if has_assistant_id:
+                st.code(get_assistant_id_from_config())
+        
+        st.divider()
+        
+        # Chat Session Management
+        st.subheader("💬 Quản Lý Chat")
+        
+        # Current session info
+        if st.session_state.current_session_id:
+            st.success(f"🎯 Session hiện tại")
+            if st.button("🆕 Chat Mới"):
+                # Save current session if has messages
+                if st.session_state.messages:
+                    for msg in st.session_state.messages:
+                        save_message(st.session_state.current_session_id, msg["role"], msg["content"])
+                
+                # Create new session
+                new_session_id = create_chat_session(st.session_state.assistant_id)
+                st.session_state.current_session_id = new_session_id
+                st.session_state.messages = []
+                st.session_state.thread_id = None
+                st.success("Đã tạo chat mới!")
+                st.rerun()
+        
+        # Chat history
+        with st.expander("📚 Lịch Sử Chat", expanded=True):
+            sessions = get_chat_sessions()
+            
+            if sessions:
+                for session in sessions[:10]:  # Show last 10 sessions
+                    session_title = session["title"]
+                    message_count = session["message_count"]
+                    
+                    col_a, col_b = st.columns([3, 1])
+                    with col_a:
+                        if st.button(f"💬 {session_title} ({message_count})", key=f"load_{session['session_id']}"):
+                            load_chat_session(session["session_id"])
+                    with col_b:
+                        if st.button("🗑️", key=f"del_{session['session_id']}"):
+                            delete_chat_session(session["session_id"])
+                            st.success("Đã xóa!")
+                            st.rerun()
+            else:
+                st.info("Chưa có lịch sử chat")
+        
+        st.divider()
+        
+        # Assistant Management
+        st.subheader("📁 Quản Lý Assistant")
+        
+        # Show current assistant status
+        if st.session_state.assistant_id:
+            assistant_info = st.session_state.get("assistant_info", {})
+            st.success(f"🤖 Đã kết nối: {assistant_info.get('name', 'Unknown')}")
+            
+            if assistant_info.get('auto_connected'):
+                st.info("🚀 Tự động kết nối từ cấu hình")
+            
+            if st.button("❌ Disconnect Assistant"):
+                st.session_state.assistant_id = None
+                st.session_state.assistant_info = {}
+                st.session_state.messages = []
+                st.session_state.thread_id = None
+                st.session_state.current_session_id = None
+                st.success("Đã ngắt kết nối")
+                st.rerun()
+        
+        else:
+            # Manual connection options
+            auto_assistant_id = get_assistant_id_from_config()
+            
+            if auto_assistant_id:
+                st.info(f"🔧 Assistant ID đã cấu hình: `{auto_assistant_id[:12]}...`")
+                st.info("Hệ thống sẽ tự động kết nối khi refresh")
+            else:
+                # Manual Assistant ID Input
+                st.write("🎯 **Kết Nối Assistant**")
+                manual_assistant_id = st.text_input(
+                    "Nhập Assistant ID",
+                    placeholder="asst_xxxxxxxxxx",
+                    help="Nhập Assistant ID có sẵn từ OpenAI"
+                )
+                
+                if st.button("🔗 Kết Nối", type="primary"):
+                    if not manual_assistant_id:
+                        st.warning("Vui lòng nhập Assistant ID")
+                    elif not manual_assistant_id.startswith('asst_'):
+                        st.error("Assistant ID phải bắt đầu bằng 'asst_'")
+                    else:
+                        connect_existing_assistant(manual_assistant_id)
+        
+        # Parameters display
+        with st.expander("📊 Tham Số Tối Ưu"):
+            st.json(OPTIMIZED_PARAMS)
+
+def load_chat_session(session_id):
+    """Load specific chat session"""
+    # Save current session first
+    if st.session_state.current_session_id and st.session_state.messages:
+        for msg in st.session_state.messages:
+            save_message(st.session_state.current_session_id, msg["role"], msg["content"])
+    
+    # Load new session
+    st.session_state.current_session_id = session_id
+    st.session_state.messages = load_chat_history(session_id)
+    st.success(f"Đã tải chat session!")
+    st.rerun()
+
+def handle_chat_with_db(prompt):
+    """Handle chat with database integration"""
+    # Add user message to session and DB
+    user_message = {"role": "user", "content": prompt, "timestamp": datetime.now().isoformat()}
+    st.session_state.messages.append(user_message)
+    save_message(st.session_state.current_session_id, "user", prompt)
+    
+    # Display user message immediately
+    display_custom_chat(st.session_state.messages)
+    
+    # Show typing indicator
+    typing_placeholder = st.empty()
+    with typing_placeholder:
+        show_typing_indicator()
+    
+    # Get AI response
+    try:
+        result = get_response_safe(
+            st.session_state.client,
+            st.session_state.assistant_id,
+            prompt,
+            st.session_state.thread_id
+        )
+        
+        # Clear typing indicator
+        typing_placeholder.empty()
+        
+        if result["success"]:
+            response = result["response"]
+            st.session_state.thread_id = result["thread_id"]
+            
+            # Update session thread_id in DB
+            if st.session_state.current_session_id:
+                update_session_thread_id(st.session_state.current_session_id, result["thread_id"])
+            
+            # Add AI response to session and DB
+            ai_message = {"role": "assistant", "content": response, "timestamp": datetime.now().isoformat()}
+            st.session_state.messages.append(ai_message)
+            save_message(st.session_state.current_session_id, "assistant", response)
+            
+            # Refresh display
+            st.rerun()
+            
+        else:
+            typing_placeholder.empty()
+            error_msg = f"❌ {result['error']}"
+            st.error(error_msg)
+            
+            # Save error message too
+            error_message = {"role": "assistant", "content": error_msg, "timestamp": datetime.now().isoformat()}
+            st.session_state.messages.append(error_message)
+            save_message(st.session_state.current_session_id, "assistant", error_msg)
+            
+    except Exception as e:
+        typing_placeholder.empty()
+        error_msg = f"❌ Lỗi hệ thống: {str(e)}"
+        st.error(error_msg)
+        
+        # Save error message
+        error_message = {"role": "assistant", "content": error_msg, "timestamp": datetime.now().isoformat()}
+        st.session_state.messages.append(error_message)
+        save_message(st.session_state.current_session_id, "assistant", error_msg)
+
+if __name__ == "__main__":
+    main()
