@@ -215,6 +215,9 @@ header {visibility: hidden;}
 </style>
 """, unsafe_allow_html=True)
 
+# Vector Store ID from your OpenAI setup
+VECTOR_STORE_ID = "vs_68695626c77881918a6b72f1b9bdd4c9"
+
 # Optimized parameters for API calls
 OPTIMIZED_PARAMS = {
     "model": "gpt-4o",
@@ -357,8 +360,9 @@ def display_custom_chat(messages):
         st.markdown("""
         <div class="welcome-message">
             <h3>💬 AI Agent Pháp Chế Khoáng Sản</h3>
-            <p>Sử dụng <strong>OpenAI API với Response/Chat Completions</strong></p>
-            <p>Đặt câu hỏi bên dưới để bắt đầu cuộc trò chuyện</p>
+            <p>Sử dụng <strong>OpenAI Response API với File Search</strong></p>
+            <p>📄 Knowledge Base: 7 văn bản pháp luật về khoáng sản</p>
+            <p>Đặt câu hỏi bên dưới để bắt đầu tư vấn pháp luật</p>
         </div>
         """, unsafe_allow_html=True)
         return
@@ -395,12 +399,14 @@ def display_custom_chat(messages):
             '''
         else:  # assistant
             api_info = ""
-            if message.get("metadata") and message["metadata"].get("api_used"):
-                api_type = message["metadata"]["api_used"]
+            if message.get("metadata"):
+                api_type = message["metadata"].get("api_used")
+                has_file_search = message["metadata"].get("has_file_search", False)
+                
                 if api_type == "responses":
-                    api_info = " (Responses API)"
+                    api_info = " (📄 Response API + File Search)" if has_file_search else " (Response API)"
                 elif api_type == "chat_completions":
-                    api_info = " (Chat API)"
+                    api_info = " (💬 Chat API)"
             
             chat_html += f'''
             <div class="ai-message">
@@ -464,26 +470,12 @@ def init_openai_client():
         st.stop()
 
 def get_file_search_tools():
-    """Get file search tools configuration"""
-    tools = []
-    
-    # Get file IDs from secrets
-    file_ids = st.secrets.get("FILE_IDS", "").split(",") if st.secrets.get("FILE_IDS") else []
-    file_ids = [fid.strip() for fid in file_ids if fid.strip()]
-    
-    if file_ids:
-        tools.append({
-            "type": "file_search",
-            "file_search": {
-                "vector_store_ids": file_ids,
-                "max_num_results": 20
-            }
-        })
-    else:
-        # Default file search without specific files
-        tools.append({"type": "file_search"})
-    
-    return tools, len(file_ids)
+    """Get file search tools configuration cho Responses API"""
+    return [{
+        "type": "file_search",
+        "vector_store_ids": [VECTOR_STORE_ID],  # Direct property, không nested
+        "max_num_results": 20
+    }]
 
 def prepare_messages(question: str, conversation_history: List[Dict]) -> List[Dict]:
     """Prepare messages for OpenAI API"""
@@ -514,9 +506,9 @@ def get_ai_response(client, question: str, conversation_history: List[Dict]) -> 
     """Get AI response with Response API fallback to Chat Completions"""
     try:
         messages = prepare_messages(question, conversation_history)
-        tools, file_count = get_file_search_tools()
+        tools = get_file_search_tools()
         
-        # Try Response API first (if available)
+        # Try Response API first với vector store
         try:
             response = client.responses.create(
                 model=OPTIMIZED_PARAMS["model"],
@@ -527,19 +519,31 @@ def get_ai_response(client, question: str, conversation_history: List[Dict]) -> 
                 store=True
             )
             
-            # Extract response text
+            # Extract response text từ Response API
             if hasattr(response, 'output_text'):
                 response_text = response.output_text
             elif hasattr(response, 'output') and response.output:
                 if isinstance(response.output, list) and len(response.output) > 0:
-                    last_output = response.output[-1]
-                    if hasattr(last_output, 'content'):
-                        if isinstance(last_output.content, list) and len(last_output.content) > 0:
-                            response_text = last_output.content[0].text
-                        else:
-                            response_text = str(last_output.content)
+                    # Tìm message cuối cùng từ assistant
+                    for output_item in reversed(response.output):
+                        if hasattr(output_item, 'content') and hasattr(output_item, 'role'):
+                            if output_item.role == 'assistant':
+                                if isinstance(output_item.content, list) and len(output_item.content) > 0:
+                                    response_text = output_item.content[0].text
+                                    break
+                                else:
+                                    response_text = str(output_item.content)
+                                    break
                     else:
-                        response_text = str(last_output)
+                        # Nếu không tìm thấy assistant message, lấy item cuối
+                        last_output = response.output[-1]
+                        if hasattr(last_output, 'content'):
+                            if isinstance(last_output.content, list) and len(last_output.content) > 0:
+                                response_text = last_output.content[0].text
+                            else:
+                                response_text = str(last_output.content)
+                        else:
+                            response_text = str(last_output)
                 else:
                     response_text = str(response.output)
             else:
@@ -549,25 +553,19 @@ def get_ai_response(client, question: str, conversation_history: List[Dict]) -> 
                 "success": True,
                 "response": response_text,
                 "api_used": "responses",
-                "file_count": file_count
+                "has_file_search": True
             }
             
         except Exception as responses_error:
-            # Fallback to Chat Completions API
-            st.info("🔄 **Fallback**: Sử dụng Chat Completions API...")
-            
-            # Prepare tools for Chat Completions
-            chat_tools = None
-            if tools:
-                chat_tools = tools
+            # Fallback to Chat Completions API (không có file search)
+            st.info("🔄 **Fallback**: Response API không khả dụng, sử dụng Chat Completions...")
             
             response = client.chat.completions.create(
                 model=OPTIMIZED_PARAMS["model"],
                 messages=messages,
                 temperature=OPTIMIZED_PARAMS["temperature"],
-                max_tokens=OPTIMIZED_PARAMS["max_tokens"],
-                tools=chat_tools,
-                tool_choice="auto" if chat_tools else None
+                max_tokens=OPTIMIZED_PARAMS["max_tokens"]
+                # Không có tools parameter - Chat Completions không thể access vector store
             )
             
             response_text = response.choices[0].message.content
@@ -576,7 +574,7 @@ def get_ai_response(client, question: str, conversation_history: List[Dict]) -> 
                 "success": True,
                 "response": response_text,
                 "api_used": "chat_completions",
-                "file_count": file_count,
+                "has_file_search": False,
                 "fallback_reason": str(responses_error)
             }
         
@@ -597,12 +595,12 @@ def main():
     
     # Header
     st.title("⚖️ AI Agent Pháp Chế Khoáng Sản")
-    st.markdown("*Tối ưu hóa cho **Streamlit Cloud** với OpenAI Response API + Chat Completions*")
+    st.markdown("*Powered by **OpenAI Response API** với Vector Store chứa văn bản pháp luật*")
     
     # API Status badge
-    st.markdown("""
+    st.markdown(f"""
     <div class="new-api-badge">
-        🚀 Streamlit Cloud Ready - OpenAI API Integration
+        📄 Legal Knowledge Base: {VECTOR_STORE_ID[:8]}... (6MB Documents)
     </div>
     """, unsafe_allow_html=True)
     
@@ -645,11 +643,10 @@ def main():
         # Config info
         with st.expander("⚙️ Cấu Hình"):
             has_api_key = bool(st.secrets.get("OPENAI_API_KEY"))
-            file_ids = st.secrets.get("FILE_IDS", "").split(",") if st.secrets.get("FILE_IDS") else []
-            file_count = len([fid for fid in file_ids if fid.strip()])
             
             st.write("**OPENAI_API_KEY:**", "✅" if has_api_key else "❌")
-            st.write("**FILE_IDS:**", f"✅ ({file_count} files)" if file_count > 0 else "❌ (Optional)")
+            st.write("**VECTOR_STORE_ID:**", f"✅ {VECTOR_STORE_ID}")
+            st.write("**FILES IN VECTOR STORE:**", "✅ Legal documents loaded")
             
             if not has_api_key:
                 st.error("⚠️ Cần cấu hình OPENAI_API_KEY trong Secrets")
@@ -719,53 +716,47 @@ def main():
         st.divider()
         
         # Deploy Info
-        st.subheader("🚀 Deploy Info")
+        st.subheader("🚀 API Info")
         
-        with st.expander("📋 Streamlit Cloud Setup"):
-            st.markdown("""
-            **✅ Required Secrets:**
-            ```toml
-            OPENAI_API_KEY = "sk-your-key-here"
-            ```
+        with st.expander("🚀 Responses API Features"):
+            st.markdown(f"""
+            **✅ Current Setup:**
+            - ⚡ Response API với file search 
+            - 📄 Vector Store: `{VECTOR_STORE_ID}`
+            - 🔍 Legal documents loaded & searchable
+            - 💾 Stateful conversations
+            - 🧹 Simplified syntax
             
-            **📁 Optional Secrets:**
-            ```toml
-            FILE_IDS = "file-abc123,file-def456"
-            ```
-            
-            **📦 Requirements.txt:**
-            ```
-            streamlit>=1.28.0
-            openai>=1.12.0
-            ```
-            
-            **⚡ Features:**
-            - ✅ Session state storage (no database)
-            - ✅ Response API with Chat fallback  
-            - ✅ File search integration
-            - ✅ Streamlit Cloud optimized
+            **📋 Configuration:**
+            - Model: `gpt-4o` (latest)
+            - Context: 128k tokens
+            - Vector Store: 6MB legal documents
+            - Temperature: 0.1 (high accuracy)
+            - Store: True (state management)
             """)
         
-        with st.expander("🔧 Troubleshooting"):
+        with st.expander("🔧 Setup Guide"):
             st.markdown("""
-            **🐛 Common Issues:**
+            **Required:**
+            - `OPENAI_API_KEY` in Advanced Settings
             
-            1. **API Key Error:**
-               - Check Secrets configuration
-               - Verify key format (starts with 'sk-')
+            **Vector Store (Đã Setup):**
+            - ✅ Vector Store ID: Hard-coded trong app
+            - ✅ Legal documents: Đã upload và processed
+            - ✅ File search: Ready to use
             
-            2. **Response API Not Available:**
-               - App auto-fallbacks to Chat Completions
-               - No action needed
-            
-            3. **Session Lost:**
-               - Sessions stored in browser memory
-               - Will reset on page refresh
-            
-            4. **File Search Not Working:**
-               - Add FILE_IDS to Secrets
-               - Upload files via OpenAI API first
+            **Note:** 
+            - App sẽ tự động fallback về Chat Completions nếu Response API fail
+            - Khi fallback, sẽ mất file search capability
+            - Primary method luôn là Response API với vector store
             """)
+        
+        # Parameters display
+        with st.expander("📊 Tham Số"):
+            params_display = OPTIMIZED_PARAMS.copy()
+            params_display["vector_store_id"] = VECTOR_STORE_ID
+            params_display["file_search"] = "enabled"
+            st.json(params_display)
 
 def handle_chat_input(prompt):
     """Handle chat input with proper error handling"""
@@ -798,19 +789,23 @@ def handle_chat_input(prompt):
         if result["success"]:
             response = result["response"]
             api_used = result["api_used"]
+            has_file_search = result.get("has_file_search", False)
             
             # Show API status
             if api_used == "responses":
-                st.success("✅ Response API")
+                st.success("✅ Response API với File Search")
             elif api_used == "chat_completions":
-                st.info("ℹ️ Chat Completions API")
+                st.warning("⚠️ Chat Completions API (Không có File Search)")
             
             # Add AI response
             ai_message = {
                 "role": "assistant", 
                 "content": response, 
                 "timestamp": datetime.now().isoformat(),
-                "metadata": {"api_used": api_used}
+                "metadata": {
+                    "api_used": api_used,
+                    "has_file_search": has_file_search
+                }
             }
             st.session_state.messages.append(ai_message)
             
@@ -820,7 +815,10 @@ def handle_chat_input(prompt):
                     st.session_state.current_session_id, 
                     "assistant", 
                     response,
-                    {"api_used": api_used}
+                    {
+                        "api_used": api_used,
+                        "has_file_search": has_file_search
+                    }
                 )
             
             st.rerun()
