@@ -222,12 +222,7 @@ header {visibility: hidden;}
     color: #721c24;
 }
 
-/* Simplified layout */
-.main-header {
-    text-align: center;
-    margin-bottom: 30px;
-}
-
+/* Feature highlight */
 .feature-highlight {
     background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
     color: white;
@@ -524,7 +519,7 @@ def show_typing_indicator():
 # HELPER FUNCTIONS
 # ===============================
 
-@st.cache_data
+@st.cache_resource  # ✅ FIXED: Use cache_resource for objects/connections
 def init_openai_client():
     """Initialize OpenAI client with error handling"""
     try:
@@ -754,10 +749,8 @@ def main():
         st.session_state.current_session_id = None
 
     # Header
-    st.markdown('<div class="main-header">', unsafe_allow_html=True)
     st.title("⚖️ AI Agent Pháp Chế Khoáng Sản")
     st.markdown("*Hệ thống AI hỗ trợ tra cứu và tư vấn pháp luật khoáng sản với độ chính xác cao*")
-    st.markdown('</div>', unsafe_allow_html=True)
     
     # Feature highlight
     st.markdown("""
@@ -832,7 +825,7 @@ def main():
             # Example questions
             st.subheader("🤔 Câu Hỏi Mẫu")
             example_questions = [
-                "Quy trình cấp phép thăm dó khoáng sản như thế nào?",
+                "Quy trình cấp phép thăm dò khoáng sản như thế nào?",
                 "Thuế tài nguyên khoáng sản được tính như thế nào?",
                 "Điều kiện để được cấp giấy phép khai thác khoáng sản?",
                 "Xử phạt vi phạm trong lĩnh vực khoáng sản có mức nào?",
