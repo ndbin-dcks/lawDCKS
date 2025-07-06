@@ -101,7 +101,7 @@ if thread_id:
     if submitted and user_input.strip():
         save_chat(thread_id, "user", user_input)
         st.session_state["pending_ai"] = user_input
-        st.experimental_rerun()
+        st.rerun()
 
     # ---- Xử lý trả lời AI khi có pending_ai (chỉ 1 lần sau mỗi submit) ----
     if st.session_state.get("pending_ai"):
@@ -128,7 +128,7 @@ if thread_id:
             messages = openai.beta.threads.messages.list(thread_id=thread_id)
             ai_answer = messages.data[0].content[0].text.value if messages.data else "Không có trả lời từ AI."
             save_chat(thread_id, "assistant", ai_answer)
-            st.experimental_rerun()
+            st.rerun()
         except Exception as e:
             st.error(f"Lỗi khi gửi câu hỏi tới Assistant: {e}")
 
