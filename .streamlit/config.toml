@@ -14,7 +14,6 @@ textColor = "#262730"
 
 [runner]
 magicEnabled = false
-installTracer = false
 
 [client]
 showErrorDetails = false
