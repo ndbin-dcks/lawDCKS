@@ -78,7 +78,7 @@ if openai.api_key and ASSISTANT_ID:
 
     # ============ Form nhập câu hỏi ============
     with st.form(key="qa_form", clear_on_submit=True):
-        user_input = st.text_area("Nhập câu hỏi pháp luật:", placeholder="Khi nào bị thu hồi giấy phép khai thác khoáng sản?", height=60)
+        user_input = st.text_area("Nhập câu hỏi pháp luật:", placeholder="Khi nào bị thu hồi giấy phép khai thác khoáng sản?", height=80)
         submitted = st.form_submit_button("Gửi")
 
     if submitted and user_input.strip():
